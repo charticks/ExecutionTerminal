@@ -1,0 +1,34 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# config.py holds live broker API keys, PINs and TOTP secrets; accounts.json
+# holds per-account credentials. Both are required to RUN but must never be
+# committed. Copy config.example.py -> config.py on a new machine.
+config.py
+accounts.json
+
+# ── Dependencies (reinstallable) ─────────────────────────────────────────────
+node_modules/
+.venv/
+venv/
+
+# ── Build output ─────────────────────────────────────────────────────────────
+charticks/dist/
+charticks/dist-electron/
+charticks/release/
+*.tsbuildinfo
+
+# ── Generated at runtime ─────────────────────────────────────────────────────
+# Instrument masters / scrip masters re-downloaded per trading day (~100 MB).
+app/data_cache/
+data_cache/
+logs/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,6 @@
+# Charticks sidecar — bridge server dependencies.
+# The reused trading engines (Angel/Kotak/Dhan, candle, filter, execution) bring
+# their own deps (SmartApi, neo_api_client, dhanhq, pandas, pyotp) — installed
+# from the parent project when live brokers are wired in (Phase 1).
+fastapi==0.115.5
+uvicorn[standard]==0.32.1

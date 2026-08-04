@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "Per-order quantity limits used by the automatic order-splitting engine.",
+    "These are the FALLBACK values: the broker limit resolver first asks the",
+    "broker adapter for live limits (fetch_order_limits) and only uses this file",
+    "when the broker does not expose them. Adding a new broker requires an entry",
+    "here (and optionally an adapter) — never a change to the execution engine.",
+    "",
+    "Lookup order: <broker>.<UNDERLYING> -> <broker>.* -> default.",
+    "maxLotsPerOrder / maxQtyPerOrder may be null (= no cap on that dimension);",
+    "when both are null, or supportsSplitting is false, the order is sent whole.",
+    "Values below mirror the exchange freeze limits used by the legacy app",
+    "(app/order_manager.py:_get_max_lots_per_order) — verify against the current",
+    "NSE/BSE freeze-quantity circular before relying on them."
+  ],
+  "default": {
+    "*": {
+      "maxLotsPerOrder": null,
+      "maxQtyPerOrder": null,
+      "supportsSplitting": false
+    }
+  },
+  "angel": {
+    "NIFTY": { "maxLotsPerOrder": 27, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "BANKNIFTY": { "maxLotsPerOrder": 30, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "FINNIFTY": { "maxLotsPerOrder": 27, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "MIDCPNIFTY": { "maxLotsPerOrder": 28, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "SENSEX": { "maxLotsPerOrder": 50, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "BANKEX": { "maxLotsPerOrder": 30, "maxQtyPerOrder": null, "supportsSplitting": true },
+    "*": { "maxLotsPerOrder": 27, "maxQtyPerOrder": null, "supportsSplitting": true }
+  },
+  "kotak": {
+    "*": { "maxLotsPerOrder": null, "maxQtyPerOrder": null, "supportsSplitting": false }
+  },
+  "dhan": {
+    "*": { "maxLotsPerOrder": null, "maxQtyPerOrder": null, "supportsSplitting": false }
+  }
+}

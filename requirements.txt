@@ -1,0 +1,21 @@
+# Python sidecar + Trading Core dependencies.
+# Install:  pip install -r requirements.txt
+
+# Sidecar (FastAPI control plane + WebSocket data plane)
+fastapi
+uvicorn[standard]
+
+# Trading Core
+pandas
+requests
+pyotp
+pytz
+logzero
+
+# Broker SDKs
+smartapi-python        # Angel One  (imported as SmartApi)
+dhanhq                 # Dhan
+neo-api-client         # Kotak Neo
+
+# Legacy Tkinter UI — still imported via app/__init__.py -> bot_app
+tkcalendar

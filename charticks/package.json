@@ -1,0 +1,42 @@
+{
+  "name": "charticks",
+  "version": "0.1.0",
+  "description": "Charticks — Execution Terminal (Electron + React + Python sidecar)",
+  "author": "Charticks",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,SIDECAR -c cyan,green \"npm:dev:vite\" \"npm:dev:sidecar\"",
+    "dev:vite": "vite",
+    "dev:sidecar": "cd ../sidecar && python -m uvicorn server:app --host 127.0.0.1 --port 8787 --reload",
+    "build": "tsc -b && vite build && electron-builder",
+    "typecheck": "tsc -b --noEmit"
+  },
+  "dependencies": {
+    "keytar": "^7.9.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "vite-plugin-electron": "^0.29.0"
+  },
+  "build": {
+    "appId": "com.charticks.terminal",
+    "productName": "Charticks",
+    "files": ["dist/**/*", "dist-electron/**/*"],
+    "extraResources": [
+      { "from": "../sidecar", "to": "sidecar", "filter": ["**/*", "!__pycache__/**", "!*.pyc"] }
+    ],
+    "win": { "target": "nsis" }
+  }
+}

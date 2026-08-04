@@ -1,0 +1,90 @@
+/* Charticks design tokens — dark + light themes, three densities.
+   Accent: electric cyan. Numbers use a tabular monospace so ticks don't jitter. */
+
+:root {
+  /* palette (light default; dark redefined below) */
+  --bg: #f4f6fa; --bg-rail: #eceff5; --panel: #ffffff; --panel-2: #f7f9fc;
+  --border: #dde2ec; --border-strong: #cbd3e1;
+  --text: #10141c; --text-dim: #5a6474; --text-faint: #939cad;
+  --accent: #0ea5c4; --accent-soft: rgba(14, 165, 196, 0.12);
+  --up: #12a150; --up-bg: rgba(18, 161, 80, 0.12);
+  --down: #e0353b; --down-bg: rgba(224, 53, 59, 0.12);
+  --amber: #d98a00;
+  --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 8px 24px rgba(16, 20, 28, 0.06);
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, monospace;
+  --sans: "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+
+  /* density (compact default) */
+  --ui: 12px; --val: 20px; --gpnl-sz: 14px; --row-py: 6px; --cell-py: 4px;
+  --ladder-sz: 11.5px; --tile-py: 10px; --gap: 10px; --pnl-sz: 12.5px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0e14; --bg-rail: #0e131b; --panel: #141922; --panel-2: #10151d;
+    --border: #1e2530; --border-strong: #2b3542;
+    --text: #e7ecf3; --text-dim: #8b96a7; --text-faint: #5c6675;
+    --accent: #22d3ee; --accent-soft: rgba(34, 211, 238, 0.12);
+    --up: #26d07c; --up-bg: rgba(38, 208, 124, 0.14);
+    --down: #ff5257; --down-bg: rgba(255, 82, 87, 0.14);
+    --amber: #f5b544;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 34px rgba(0, 0, 0, 0.45);
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f6fa; --bg-rail: #eceff5; --panel: #ffffff; --panel-2: #f7f9fc;
+  --border: #dde2ec; --border-strong: #cbd3e1;
+  --text: #10141c; --text-dim: #5a6474; --text-faint: #939cad;
+  --accent: #0ea5c4; --accent-soft: rgba(14, 165, 196, 0.12);
+  --up: #12a150; --up-bg: rgba(18, 161, 80, 0.12);
+  --down: #e0353b; --down-bg: rgba(224, 53, 59, 0.12);
+  --amber: #d98a00;
+  --shadow: 0 1px 2px rgba(16, 20, 28, 0.06), 0 8px 24px rgba(16, 20, 28, 0.06);
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b0e14; --bg-rail: #0e131b; --panel: #141922; --panel-2: #10151d;
+  --border: #1e2530; --border-strong: #2b3542;
+  --text: #e7ecf3; --text-dim: #8b96a7; --text-faint: #5c6675;
+  --accent: #22d3ee; --accent-soft: rgba(34, 211, 238, 0.12);
+  --up: #26d07c; --up-bg: rgba(38, 208, 124, 0.14);
+  --down: #ff5257; --down-bg: rgba(255, 82, 87, 0.14);
+  --amber: #f5b544;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 34px rgba(0, 0, 0, 0.45);
+}
+
+:root[data-density="comfortable"] {
+  --ui: 13px; --val: 24px; --gpnl-sz: 15px; --row-py: 9px; --cell-py: 6px;
+  --ladder-sz: 12px; --tile-py: 13px; --gap: 14px; --pnl-sz: 13.5px;
+}
+:root[data-density="dense"] {
+  --ui: 11px; --val: 17px; --gpnl-sz: 13px; --row-py: 3.5px; --cell-py: 2px;
+  --ladder-sz: 10.5px; --tile-py: 7px; --gap: 7px; --pnl-sz: 11.5px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans);
+  font-size: var(--ui); -webkit-font-smoothing: antialiased; overflow: hidden;
+}
+button { font-family: inherit; color: inherit; cursor: pointer; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.up { color: var(--up); } .down { color: var(--down); }
+.bg-up { background: var(--up-bg); } .bg-down { background: var(--down-bg); }
+
+.flash-up { animation: fUp 0.5s ease-out; }
+.flash-down { animation: fDown 0.5s ease-out; }
+@keyframes fUp { 0% { color: var(--up); text-shadow: 0 0 14px var(--up); } }
+@keyframes fDown { 0% { color: var(--down); text-shadow: 0 0 14px var(--down); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .flash-up, .flash-down { animation: none; }
+}
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

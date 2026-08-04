@@ -1,0 +1,115 @@
+{
+  "index": "NIFTY",
+  "lots": 1,
+  "live_interval": "5min",
+  "trade_exec_mode": "Auto",
+  "spot_detect_mode": "TIME",
+  "ema_fast": 20,
+  "ema_slow": 50,
+  "spot_candle_tf": "3min",
+  "pdh_pdl_target": "BOTH",
+  "pdh_value": 0.0,
+  "pdl_value": 0.0,
+  "entry_mode": "MARKET",
+  "candle_sl_mode": "points",
+  "sl_candle_tf": "5min",
+  "sl_ohlc_field": "low",
+  "target_ohlc_field": "high",
+  "sl_pct_entry": 2.0,
+  "target_pct_entry": 4.0,
+  "swing_lookback": 5,
+  "enable_tsl": false,
+  "tsl_step": 10.0,
+  "gexp_override": false,
+  "gexp_method": "approach1",
+  "gexp_sl_pct": 30.0,
+  "gexp_rr": 3.0,
+  "gexp_tsl_step": 20.0,
+  "strike_mode": "LEGACY",
+  "use_strongest_strike": false,
+  "custom_range_from": -200,
+  "custom_range_to": 0,
+  "custom_range_ce": true,
+  "custom_range_pe": true,
+  "enable_quant": false,
+  "filter_ema": false,
+  "ema_f1": 20,
+  "ema_f2": 50,
+  "ema_f3": 0,
+  "ema_alignment": false,
+  "filter_rsi": false,
+  "rsi_min_threshold": 50,
+  "filter_range": false,
+  "filter_volume": false,
+  "filter_vwap": false,
+  "filter_gamma_trap": false,
+  "filter_gamma_expansion": false,
+  "filter_multi_bar": false,
+  "filter_time_window": false,
+  "time_window_start": "11:30",
+  "time_window_end": "14:30",
+  "time_window_eod": true,
+  "filter_consolidation": false,
+  "consol_lookback": 7,
+  "consol_atr_ratio": 0.6,
+  "filter_vol_ratio": false,
+  "vol_ratio_min": 2.0,
+  "vol_follow_through": true,
+  "filter_body_quality": false,
+  "body_quality_min": 0.6,
+  "filter_adx": false,
+  "adx_min": 20,
+  "filter_supertrend": false,
+  "filter_session_blocks": true,
+  "filter_oi": false,
+  "oi_min": 50000,
+  "filter_spread_guard": false,
+  "max_spread_pct": 2.0,
+  "ema_period": 20,
+  "rsi_period": 14,
+  "directional_vars": {
+    "ATM": {
+      "CE": true,
+      "PE": true
+    },
+    "+50": {
+      "CE": false,
+      "PE": false
+    },
+    "-50": {
+      "CE": false,
+      "PE": false
+    },
+    "+100": {
+      "CE": false,
+      "PE": false
+    },
+    "-100": {
+      "CE": false,
+      "PE": false
+    },
+    "+200": {
+      "CE": false,
+      "PE": false
+    },
+    "-200": {
+      "CE": false,
+      "PE": false
+    }
+  },
+  "legacy_gap_vars": {
+    "ATM": true,
+    "+1": true,
+    "-1": true,
+    "+2": false,
+    "-2": false
+  },
+  "numeric_entries": {
+    "Entry Price": "",
+    "Tolerance": "",
+    "SL Points": "15",
+    "Target Points": "20"
+  },
+  "spot_time": "14:46",
+  "_name": "market price"
+}
