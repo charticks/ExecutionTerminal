@@ -11,6 +11,17 @@ interface BrokersApi {
   rename(id: string, nickname: string): Promise<{ ok: boolean; error?: string }>;
   remove(id: string): Promise<{ ok: boolean }>;
   getSecrets(id: string): Promise<Credentials | null>;
+  iciciLogin?(apiKey: string): Promise<{ ok: boolean; token?: string; error?: string }>;
+}
+
+/** Opens ICICI's login page (Electron only) and returns the daily session key.
+ *  Unavailable in the dev-browser fallback — there is no window to open. */
+export async function iciciLogin(apiKey: string): Promise<{ ok: boolean; token?: string; error?: string }> {
+  const api = electronApi();
+  if (!api?.iciciLogin) {
+    return { ok: false, error: "ICICI login is only available in the desktop app." };
+  }
+  return api.iciciLogin(apiKey);
 }
 
 function electronApi(): BrokersApi | null {

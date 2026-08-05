@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 export type Theme = "dark" | "light";
 export type Density = "comfortable" | "compact" | "dense";
-export type Screen = "home" | "orders" | "positions" | "strategies" | "brokers" | "settings";
+export type Screen = "home" | "orders" | "strategies" | "brokers" | "settings";
 
 interface UiState {
   theme: Theme;
@@ -12,7 +12,7 @@ interface UiState {
    *  hours; the single "Market Closed" dialog lives in App and reads this. */
   marketClosedNotice: boolean;
   /** Working order the user asked to modify (from the duplicate-order dialog).
-   *  The matching row in Positions enters edit mode and clears this. */
+   *  The matching row in the Home position grid enters edit mode and clears this. */
   editOrderId: string | null;
   setTheme: (t: Theme) => void;
   toggleTheme: () => void;

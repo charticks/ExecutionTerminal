@@ -1,0 +1,14 @@
+{
+  "name": "charticks-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repo root. The Electron app lives in charticks/ and owns the real package.json — these scripts only forward there, so npm commands work from the repo root as well as from charticks/. Deliberately has no dependencies: never run npm install here.",
+  "scripts": {
+    "dev": "npm --prefix charticks run dev",
+    "build": "npm --prefix charticks run build",
+    "typecheck": "npm --prefix charticks run typecheck",
+    "sidecar": "npm --prefix charticks run dev:sidecar",
+    "vite": "npm --prefix charticks run dev:vite",
+    "setup": "npm --prefix charticks install"
+  }
+}

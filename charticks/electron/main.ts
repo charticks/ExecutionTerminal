@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, session } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -123,7 +123,7 @@ ipcMain.handle("bridge:config", () => ({
 // renderer never receives secrets except transiently, just before a connect.
 // ---------------------------------------------------------------------------
 // Predefined SDK brokers; custom brokers store their own key string here.
-type BrokerId = "angel" | "kotak" | "dhan";
+type BrokerId = "angel" | "kotak" | "dhan" | "icici";
 interface StoredAccount {
   id: string;
   broker: BrokerId | string;
@@ -209,6 +209,9 @@ function migrateFromConfigPy(): void {
   add("angel", { apiKey: val("API_KEY"), clientId: val("CLIENT_ID"), pin: val("PIN"), totpSecret: val("TOTP_SECRET") }, ["apiKey", "clientId"]);
   add("kotak", { consumerKey: val("KOTAK_CONSUMER_KEY"), mobile: val("KOTAK_MOBILE_NO"), ucc: val("KOTAK_UCC"), mpin: val("KOTAK_MPIN"), totpSecret: val("KOTAK_TOTP_SECRET") }, ["consumerKey", "ucc"]);
   add("dhan", { clientId: val("DHAN_CLIENT_ID"), accessToken: val("DHAN_ACCESS_TOKEN") }, ["clientId"]);
+  // sessionToken is deliberately NOT seeded: ICICI's expires daily and is only
+  // ever obtained through the login popup below.
+  add("icici", { apiKey: val("ICICI_API_KEY"), apiSecret: val("ICICI_API_SECRET"), sessionToken: "" }, ["apiKey", "apiSecret"]);
   if (seeded.length) writeStore({ accounts: seeded });
 }
 
@@ -267,6 +270,126 @@ ipcMain.handle("brokers:getSecrets", (_e, id: string) => {
   const acct = readStore().accounts.find((a) => a.id === id);
   if (!acct) return null;
   return decryptSecrets(acct);
+});
+
+// ── ICICI Direct daily login popup ──────────────────────────────────────
+// ICICI will not let an app authenticate on its own: the user logs in through
+// ICICI's own page and ICICI hands back a session key that dies overnight.
+// Rather than making the user copy/paste it every morning, the real login page
+// is opened in a modal child window and the key is captured as it comes back.
+//
+// It comes back in one of two shapes depending on the app's registered
+// redirect URL, so BOTH are watched: as a query parameter on a navigation, and
+// as a form POST body. The redirect target itself is never loaded (nothing
+// listens on it) — the request is cancelled the moment the key is read.
+const ICICI_LOGIN_PARTITION = "persist:icici-login";
+const ICICI_LOGIN_TIMEOUT_MS = 10 * 60 * 1000; // OTP entry can be slow
+let iciciLoginWindow: BrowserWindow | null = null;
+
+function findSessionParam(raw: string): string | null {
+  // Accept apisession / API_Session / api_session in any casing.
+  try {
+    const url = new URL(raw);
+    for (const [k, v] of url.searchParams.entries()) {
+      if (k.toLowerCase().replace(/_/g, "") === "apisession" && v) return v;
+    }
+  } catch {
+    /* not a parseable URL — ignore */
+  }
+  return null;
+}
+
+function findSessionInBody(body: string): string | null {
+  try {
+    const params = new URLSearchParams(body);
+    for (const [k, v] of params.entries()) {
+      if (k.toLowerCase().replace(/_/g, "") === "apisession" && v) return v;
+    }
+  } catch {
+    /* not form-encoded — ignore */
+  }
+  return null;
+}
+
+ipcMain.handle("icici:login", async (_e, apiKey: string): Promise<{ ok: boolean; token?: string; error?: string }> => {
+  if (!apiKey || !apiKey.trim()) {
+    return { ok: false, error: "Enter your ICICI API Key first." };
+  }
+  if (iciciLoginWindow && !iciciLoginWindow.isDestroyed()) {
+    iciciLoginWindow.focus();
+    return { ok: false, error: "An ICICI login window is already open." };
+  }
+
+  const popup = new BrowserWindow({
+    parent: win ?? undefined,
+    modal: true,
+    width: 520,
+    height: 760,
+    autoHideMenuBar: true,
+    title: "Log in to ICICI Direct",
+    webPreferences: {
+      partition: ICICI_LOGIN_PARTITION,
+      nodeIntegration: false,
+      contextIsolation: true,
+      // No preload: this window renders a third-party page and must never
+      // reach any Charticks API.
+    },
+  });
+  iciciLoginWindow = popup;
+
+  const ses = session.fromPartition(ICICI_LOGIN_PARTITION);
+
+  return await new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: { ok: boolean; token?: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ses.webRequest.onBeforeRequest(null);
+      if (!popup.isDestroyed()) popup.close();
+      resolve(result);
+    };
+
+    const timer = setTimeout(
+      () => finish({ ok: false, error: "Login timed out. Please try again." }),
+      ICICI_LOGIN_TIMEOUT_MS
+    );
+
+    // (a) token as a query parameter on any navigation/redirect
+    const onNavigate = (_ev: unknown, url: string) => {
+      const token = findSessionParam(url);
+      if (token) finish({ ok: true, token });
+    };
+    popup.webContents.on("will-redirect", onNavigate);
+    popup.webContents.on("will-navigate", onNavigate);
+    popup.webContents.on("did-navigate", onNavigate);
+
+    // (b) token in a form POST body — cancel the request so the popup never
+    // tries to load the (dead) redirect target and flash a connection error.
+    ses.webRequest.onBeforeRequest({ urls: ["*://*/*"] }, (details, callback) => {
+      if (details.method === "POST" && details.uploadData?.length) {
+        const body = details.uploadData
+          .map((part) => (part.bytes ? Buffer.from(part.bytes).toString("utf-8") : ""))
+          .join("");
+        const token = findSessionInBody(body);
+        if (token) {
+          callback({ cancel: true });
+          finish({ ok: true, token });
+          return;
+        }
+      }
+      callback({});
+    });
+
+    popup.on("closed", () => {
+      iciciLoginWindow = null;
+      finish({ ok: false, error: "Login window closed before a session key was captured." });
+    });
+
+    popup.loadURL(
+      `https://api.icicidirect.com/apiuser/login?api_key=${encodeURIComponent(apiKey.trim())}`
+    ).catch((err: Error) => finish({ ok: false, error: `Could not open ICICI login: ${err.message}` }));
+  });
 });
 
 app.whenReady().then(() => {

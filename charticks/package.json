@@ -33,9 +33,14 @@
   "build": {
     "appId": "com.charticks.terminal",
     "productName": "Charticks",
+    "directories": { "output": "release" },
     "files": ["dist/**/*", "dist-electron/**/*"],
     "extraResources": [
-      { "from": "../sidecar", "to": "sidecar", "filter": ["**/*", "!__pycache__/**", "!*.pyc"] }
+      {
+        "from": "../sidecar",
+        "to": "sidecar",
+        "filter": ["**/*", "!__pycache__/**", "!**/__pycache__/**", "!*.pyc", "!**/*.pyc", "!logs/**", "!**/*.log"]
+      }
     ],
     "win": { "target": "nsis" }
   }

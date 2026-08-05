@@ -22,6 +22,12 @@ _SESSION_EXPIRED_MARKERS = (
     "token expired",
     "unauthorized",
     "authentication failed",
+    # ICICI Breeze: the SDK raises this exact wording when the daily session
+    # token is dead (config.py AUTHENICATION_EXCEPTION, sic), and REST errors
+    # mention the session key by name.
+    "could not authenticate credentials",
+    "session key",
+    "api session",
 )
 
 # Substrings that indicate a transient network/connectivity issue rather than

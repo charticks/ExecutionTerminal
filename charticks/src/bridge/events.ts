@@ -1,7 +1,7 @@
 // Typed event contract between the Python sidecar (data plane) and the renderer.
 // Keep in sync with sidecar/bridge/events.py.
 
-export type BrokerId = "angel" | "kotak" | "dhan";
+export type BrokerId = "angel" | "kotak" | "dhan" | "icici";
 // Kept in sync with sidecar/services/broker_manager.py health values.
 // "reconnecting" is retained as an alias of the amber/transitional state.
 export type BrokerHealth =

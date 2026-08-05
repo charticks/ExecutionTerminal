@@ -45,8 +45,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-SUPPORTED = ("angel", "kotak", "dhan")
-LABEL = {"angel": "Angel One", "kotak": "Kotak Neo", "dhan": "Dhan HQ"}
+SUPPORTED = ("angel", "kotak", "dhan", "icici")
+LABEL = {"angel": "Angel One", "kotak": "Kotak Neo", "dhan": "Dhan HQ",
+         "icici": "ICICI Direct"}
 
 # Health values kept in sync with charticks/src/bridge/events.ts BrokerHealth.
 CONNECTING = "connecting"
@@ -151,14 +152,23 @@ class BrokerManager:
         limit_resolver.invalidate(account_id)
         self._set_health(account_id, broker, CONNECTING)
         try:
+            # Every broker gets an EXPLICIT branch — no fallthrough. The old
+            # trailing `return self._connect_dhan(...)` meant any broker added
+            # to SUPPORTED without a branch here was silently handed to the
+            # Dhan connector, credentials and all.
             if broker == "angel":
                 return self._connect_angel(account_id, creds)
             if broker == "kotak":
                 return self._connect_kotak(account_id, creds)
-            return self._connect_dhan(account_id, creds)
+            if broker == "dhan":
+                return self._connect_dhan(account_id, creds)
+            if broker == "icici":
+                return self._connect_icici(account_id, creds)
+            self._set_health(account_id, broker, DOWN, "no connector implemented")
+            return {"ok": False, "error": f"no connector for broker '{broker}'"}
         except Exception as exc:  # defensive
             self._set_health(account_id, broker, DOWN, str(exc))
-            self._log("error", f"❌ {LABEL[broker]} connect crashed: {exc}")
+            self._log("error", f"❌ {LABEL.get(broker, broker)} connect crashed: {exc}")
             return {"ok": False, "error": str(exc)}
 
     def disconnect(self, account_id: str) -> dict:
@@ -208,6 +218,14 @@ class BrokerManager:
         with self._lock:
             broker = self._broker.get(account_id, "")
             creds = self._creds.get(account_id)
+        if broker == "icici":
+            # The Breeze session token comes from a daily BROWSER login; the
+            # cached one is dead by definition when we land here. `permanent`
+            # makes SessionManager park the account at session_expired with
+            # this message instead of burning its retries down to DOWN.
+            return {"ok": False, "permanent": True,
+                    "error": "ICICI session key expires daily — log in again "
+                             "from the Brokers screen"}
         if not broker or not creds:
             return {"ok": False, "error": "no cached credentials for reauth"}
         # Session re-established — cached order limits must be re-resolved.
@@ -394,6 +412,61 @@ class BrokerManager:
             self._set_health(account_id, "dhan", SESSION_EXPIRED, str(e))
             self._log("error", f"❌ Dhan Login Failed: {e}")
             return {"ok": False, "error": str(e)}
+
+    # ── ICICI Direct (Breeze) ─────────────────────────────────────────────
+    def _connect_icici(self, account_id: str, creds: dict) -> dict:
+        try:
+            # NOT a plain `from breeze_connect import ...` — the SDK does a bare
+            # `import config` that collides with Charticks' own config.py on
+            # sys.path. See services.feeds.icici_feed.import_breeze.
+            from services.feeds.icici_feed import import_breeze
+            BreezeConnect = import_breeze()
+        except ImportError as e:
+            msg = f"breeze-connect not importable ({e}). Run: pip install breeze-connect"
+            self._set_health(account_id, "icici", DOWN, msg)
+            self._log("error", f"❌ ICICI: {msg}")
+            return {"ok": False, "error": msg}
+
+        api_key = creds.get("apiKey")
+        api_secret = creds.get("apiSecret")
+        session_token = creds.get("sessionToken")
+        if not (api_key and api_secret and session_token):
+            msg = "Missing ICICI credentials (apiKey/apiSecret/sessionToken)"
+            self._set_health(account_id, "icici", DOWN, msg)
+            return {"ok": False, "error": msg}
+        try:
+            self._log("info", "🔄 ICICI Direct: validating session key...")
+            breeze = BreezeConnect(api_key=api_key)
+            breeze.generate_session(api_secret=api_secret,
+                                    session_token=session_token)
+            # generate_session does not fail loudly on a dead token — validate
+            # with a real authenticated call before declaring the account up.
+            resp = breeze.get_funds()
+            status = resp.get("Status") if isinstance(resp, dict) else None
+            err = resp.get("Error") if isinstance(resp, dict) else None
+            if status != 200 or err:
+                raise Exception(err or f"ICICI funds check failed (status {status})")
+            with self._lock:
+                self._sessions[account_id] = breeze
+            self._set_health(account_id, "icici", CONNECTED)
+            self._log("info", "✅ ICICI Direct Login Success")
+            # Feed builds its OWN BreezeConnect from these — teardown can then
+            # never disturb this trading session. Re-applied on every connect
+            # so a fresh daily login clears the feed's needs-reauth latch.
+            self._start_feed(account_id, "icici", session_tokens={
+                "api_key": api_key,
+                "api_secret": api_secret,
+                "session_token": session_token,
+            })
+            return {"ok": True}
+        except Exception as e:
+            # session_expired, not DOWN: the by-far most likely cause is the
+            # daily session key having lapsed, and the fix is a new login.
+            detail = (f"{e} — ICICI's session key expires daily; use "
+                      f"Login with ICICI in Edit Credentials, then reconnect")
+            self._set_health(account_id, "icici", SESSION_EXPIRED, detail)
+            self._log("error", f"❌ ICICI Direct Login Failed: {e}")
+            return {"ok": False, "error": detail}
 
     # ── Instrument master (headless port of login.py:392-425) ─────────────
     def _load_master(self, smart: Any) -> None:

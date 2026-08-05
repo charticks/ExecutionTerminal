@@ -3,7 +3,6 @@ import { Rail } from "./Rail";
 import { StatusBar } from "./StatusBar";
 import { Home } from "@/screens/Home";
 import { Orders } from "@/screens/Orders";
-import { Positions } from "@/screens/Positions";
 import { Brokers } from "@/screens/Brokers";
 import { Settings } from "@/screens/Settings";
 import { Placeholder } from "@/screens/Placeholder";
@@ -48,7 +47,6 @@ export function App() {
       <main className="work">
         {screen === "home" && <Home />}
         {screen === "orders" && <Orders />}
-        {screen === "positions" && <Positions />}
         {screen === "strategies" && <Placeholder title="Strategies" />}
         {screen === "brokers" && <Brokers />}
         {screen === "settings" && <Settings />}

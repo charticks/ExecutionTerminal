@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { FlashNumber } from "@/components/FlashNumber";
-import { OptionChainPanel } from "@/components/OptionChainPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SessionLimitsBar } from "@/components/SessionLimitsBar";
 import { RollDialog, type RollDirection } from "@/components/RollDialog";
@@ -864,18 +863,5 @@ function MockPositionGridPanel() {
         />
       )}
     </section>
-  );
-}
-
-/** Standalone Positions screen (kept until the tab is retired; Home reuses the
- *  same PositionGridPanel / OptionChainPanel pieces). */
-export function Positions() {
-  return (
-    <div className="pos-layout">
-      <div className="pos-left">
-        <PositionGridPanel />
-      </div>
-      <OptionChainPanel />
-    </div>
   );
 }

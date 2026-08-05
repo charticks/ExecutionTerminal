@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { credentials as credStore } from "@/bridge/credentials";
+import { credentials as credStore, iciciLogin } from "@/bridge/credentials";
 import {
   BROKER_LABEL,
   BROKER_ORDER,
@@ -123,6 +123,9 @@ export function BrokerFormDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [addingBroker, setAddingBroker] = useState(false);
+  // ICICI-only: the daily session key is captured by a login popup, never typed.
+  const [iciciBusy, setIciciBusy] = useState(false);
+  const [iciciNote, setIciciNote] = useState<string | null>(null);
   const customBrokers = useCustomBrokersStore((s) => s.brokers);
   useEscape(onCancel);
 
@@ -133,6 +136,23 @@ export function BrokerFormDialog({
   }, [account]);
 
   const fields = credFieldsFor(broker);
+
+  const doIciciLogin = async () => {
+    setIciciBusy(true);
+    setIciciNote(null);
+    setError(null);
+    try {
+      const res = await iciciLogin(creds.apiKey ?? "");
+      if (res.ok && res.token) {
+        setCreds((c) => ({ ...c, sessionToken: res.token as string }));
+        setIciciNote("Session key captured — click Save.");
+      } else {
+        setError(res.error ?? "ICICI login failed.");
+      }
+    } finally {
+      setIciciBusy(false);
+    }
+  };
 
   const save = async () => {
     const missing = fields.filter((f) => !creds[f.key]?.trim());
@@ -215,6 +235,22 @@ export function BrokerFormDialog({
             )}
           </label>
         ))}
+
+        {broker === "icici" && (
+          <div className="fld">
+            <span />
+            <div>
+              <button className="btn-ghost" onClick={doIciciLogin}
+                      disabled={iciciBusy || !creds.apiKey?.trim()}>
+                {iciciBusy ? "Waiting for ICICI login…" : "Log in with ICICI"}
+              </button>
+              <div className="hint">
+                {iciciNote ??
+                 "ICICI's session key expires daily — log in again each morning."}
+              </div>
+            </div>
+          </div>
+        )}
 
         <label className="fld-check">
           <input type="checkbox" checked={autoConnect}

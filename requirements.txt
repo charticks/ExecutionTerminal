@@ -16,6 +16,7 @@ logzero
 smartapi-python        # Angel One  (imported as SmartApi)
 dhanhq                 # Dhan
 neo-api-client         # Kotak Neo
+breeze-connect         # ICICI Direct (imported as breeze_connect)
 
 # Legacy Tkinter UI — still imported via app/__init__.py -> bot_app
 tkcalendar

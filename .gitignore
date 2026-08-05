@@ -30,5 +30,7 @@ __pycache__/
 # ── OS / editor ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+# Office writes a "~$name.xlsx" lock file next to any doc that is currently open.
+~$*
 .vscode/
 .idea/

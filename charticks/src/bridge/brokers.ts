@@ -9,9 +9,10 @@ export const BROKER_LABEL: Record<BrokerId, string> = {
   angel: "Angel One",
   kotak: "Kotak Neo",
   dhan: "Dhan HQ",
+  icici: "ICICI Direct",
 };
 
-export const BROKER_ORDER: BrokerId[] = ["angel", "kotak", "dhan"];
+export const BROKER_ORDER: BrokerId[] = ["angel", "kotak", "dhan", "icici"];
 
 /** A credential field to render in the Add/Edit dialog. `secret` fields are
  *  masked in the UI; all credential values are encrypted at rest. */
@@ -39,6 +40,15 @@ export const CRED_FIELDS: Record<BrokerId, CredField[]> = {
   dhan: [
     { key: "clientId", label: "Client ID" },
     { key: "accessToken", label: "Access Token", secret: true },
+  ],
+  // ICICI has no TOTP and no long-lived token: the session key is issued by a
+  // browser login and expires daily, so it is filled by the "Log in with
+  // ICICI" button in the dialog rather than typed.
+  icici: [
+    { key: "apiKey", label: "API Key", secret: true },
+    { key: "apiSecret", label: "API Secret", secret: true },
+    { key: "sessionToken", label: "Session Key", secret: true,
+      placeholder: "Use the Log in with ICICI button below" },
   ],
 };
 

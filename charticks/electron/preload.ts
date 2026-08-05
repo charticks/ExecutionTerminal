@@ -9,7 +9,7 @@ export interface BridgeConfig {
   wsUrl: string;
 }
 
-type BrokerId = "angel" | "kotak" | "dhan";
+type BrokerId = "angel" | "kotak" | "dhan" | "icici";
 interface AccountMeta {
   id: string;
   broker: BrokerId;
@@ -37,5 +37,9 @@ contextBridge.exposeInMainWorld("charticks", {
       ipcRenderer.invoke("brokers:rename", id, nickname),
     remove: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("brokers:delete", id),
     getSecrets: (id: string): Promise<Credentials | null> => ipcRenderer.invoke("brokers:getSecrets", id),
+    // Opens ICICI's own login page and returns the daily session key it hands
+    // back. ICICI has no TOTP, so this is the only way to obtain one.
+    iciciLogin: (apiKey: string): Promise<{ ok: boolean; token?: string; error?: string }> =>
+      ipcRenderer.invoke("icici:login", apiKey),
   },
 });

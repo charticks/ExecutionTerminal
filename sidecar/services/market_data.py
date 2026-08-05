@@ -464,6 +464,44 @@ class PositionsAdapter:
             })
         return out
 
+    def _icici(self, account_id: str, sess: Any) -> list[dict]:
+        """Breeze get_portfolio_positions() → {"Success": [...], "Status": 200}.
+        Row field names are produced server-side (not visible in the SDK), so
+        every read has documented fallbacks — a shape drift shows up as a
+        skipped row, never a wrong number. Needs one live-account validation
+        pass like the Dhan/Kotak normalisers had."""
+        out: list[dict] = []
+        resp = sess.get_portfolio_positions()
+        rows = resp.get("Success") if isinstance(resp, dict) else None
+        for p in rows or []:
+            if not isinstance(p, dict):
+                continue
+            qty = int(self._f(p.get("quantity") or p.get("net_quantity") or p.get("qty")))
+            if qty == 0:
+                continue
+            action = str(p.get("action") or p.get("buy_sell") or "").upper()
+            side = "SELL" if (qty < 0 or action.startswith("S")) else "BUY"
+            avg = self._f(p.get("average_price") or p.get("avg_price") or p.get("price"))
+            ltp = self._f(p.get("ltp") or p.get("last_traded_price") or p.get("current_price"))
+            pnl = self._f(p.get("pnl") or p.get("unrealized_profit") or p.get("profit_and_loss"))
+            symbol = (p.get("stock_code") or p.get("underlying") or "")
+            extra = ""
+            if p.get("strike_price"):
+                right = str(p.get("right") or "").upper()
+                opt = {"CALL": "CE", "PUT": "PE"}.get(right, right)
+                extra = f" {p.get('expiry_date','')} {p.get('strike_price')} {opt}".rstrip()
+            out.append({
+                "id": f"{account_id}:{symbol}{extra}",
+                "symbol": f"{symbol}{extra}",
+                "side": side,
+                "qty": abs(qty),
+                "entry": round(avg, 2),
+                "ltp": round(ltp, 2),
+                "pnl": round(pnl, 2),
+                "account": account_id,
+            })
+        return out
+
     def _poll_once(self) -> None:
         sessions = manager.connected_sessions()
         seen: set[str] = set()
@@ -476,6 +514,8 @@ class PositionsAdapter:
                     rows = self._dhan(account_id, sess)
                 elif broker == "kotak":
                     rows = self._kotak(account_id, sess)
+                elif broker == "icici":
+                    rows = self._icici(account_id, sess)
                 else:
                     rows = []
             except Exception as e:

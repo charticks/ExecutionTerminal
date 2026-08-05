@@ -86,6 +86,15 @@ class SessionManager:
                     if self._on_recovered:
                         self._on_recovered(account_id)
                     return
+                if result.get("permanent"):
+                    # This broker's session CANNOT be renewed programmatically
+                    # (e.g. ICICI's daily browser login). Retrying would burn
+                    # the attempts and end at DOWN with a generic message —
+                    # stay at session_expired with the actionable one instead.
+                    msg = result.get("error") or "Re-authentication requires a manual login"
+                    self._log("warn", f"[recovery] {account_id}: {msg}")
+                    self._set_health(account_id, broker, SESSION_EXPIRED, msg)
+                    return
                 import time as _time
                 _time.sleep(self._retry.next_delay(attempt))
                 attempt += 1

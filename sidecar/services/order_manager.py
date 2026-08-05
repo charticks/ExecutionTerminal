@@ -141,7 +141,8 @@ class OrderManager:
 
         On the first child failure we STOP — the remaining quantity is reported
         back rather than fired blindly, so the user decides whether to retry."""
-        if broker != "angel":
+        placer = self._live_placer(broker)
+        if placer is None:
             return {"ok": False, "broker": broker,
                     "error": f"Live order routing for {broker} is not available yet."}
 
@@ -151,8 +152,8 @@ class OrderManager:
         # Fast path — within the broker limit: identical to the pre-splitting flow.
         if len(chunks) == 1:
             try:
-                res = self._place_angel(sess, underlying, expiry, strike, opt_type,
-                                        side, qty, order_type, price, product, validity)
+                res = placer(account_id, sess, underlying, expiry, strike, opt_type,
+                             side, qty, order_type, price, product, validity)
             except Exception as e:  # defensive — never let one account kill the rest
                 res = {"ok": False, "broker": broker, "error": str(e)}
             lvl = "info" if res.get("ok") else "error"
@@ -172,9 +173,9 @@ class OrderManager:
         executed = 0
         for idx, (chunk_qty, _chunk_lots) in enumerate(chunks, start=1):
             try:
-                res = self._place_angel(sess, underlying, expiry, strike, opt_type,
-                                        side, chunk_qty, order_type, price,
-                                        product, validity)
+                res = placer(account_id, sess, underlying, expiry, strike, opt_type,
+                             side, chunk_qty, order_type, price,
+                             product, validity)
             except Exception as e:
                 res = {"ok": False, "broker": broker, "error": str(e)}
             if not res.get("ok"):
@@ -198,8 +199,21 @@ class OrderManager:
                 "parentId": parent_id, "childOrderIds": child_ids,
                 "requestedQty": qty, "executedQty": executed, "split": len(chunks)}
 
+    # ── live placement dispatch ─────────────────────────────────────────────
+    # Broker → placement method name. Every placer shares one signature:
+    # (account_id, sess, underlying, expiry, strike, opt_type, side, qty,
+    #  order_type, price, product, validity) -> dict. A broker absent here gets
+    # the "not available yet" gate in _place_with_splitting — adding live
+    # routing for a broker is one method plus one entry.
+    _LIVE_PLACERS = {"angel": "_place_angel", "icici": "_place_icici"}
+
+    def _live_placer(self, broker: str):
+        name = self._LIVE_PLACERS.get((broker or "").lower())
+        return getattr(self, name) if name else None
+
     # ── Angel live placement (port of app/order_manager.py:184-197) ─────────
-    def _place_angel(self, smart: Any, underlying: str, expiry: str, strike: float,
+    def _place_angel(self, _account_id: str, smart: Any, underlying: str,
+                     expiry: str, strike: float,
                      opt_type: str, side: str, qty: int, order_type: str,
                      price: float, product: str = "NRML", validity: str = "DAY") -> dict:
         exch = _ANGEL_EXCH.get(underlying, "NFO")
@@ -227,6 +241,73 @@ class OrderManager:
         # SmartConnect.placeOrder returns the order id (str) or a dict per SDK version.
         order_id = resp.get("data", {}).get("orderid") if isinstance(resp, dict) else resp
         return {"ok": True, "broker": "angel", "orderId": order_id, "tradingsymbol": tradingsymbol}
+
+    # ── ICICI Direct (Breeze) live placement ───────────────────────────────
+    # Breeze addresses a contract by (stock_code, exchange_code, expiry, right,
+    # strike) — there is no token — so `stock_code` comes from the ICICI scrip
+    # master's ShortName column, resolved by the feed's loaded master.
+    _ICICI_EXCH = {"SENSEX": "BFO", "BANKEX": "BFO"}
+
+    @staticmethod
+    def _icici_expiry(expiry: str) -> str:
+        """'02SEP2026' -> Breeze's ISO-with-time form."""
+        from datetime import datetime
+        return datetime.strptime(expiry, "%d%b%Y").strftime("%Y-%m-%dT06:00:00.000Z")
+
+    def _place_icici(self, account_id: str, breeze: Any, underlying: str,
+                     expiry: str, strike: float, opt_type: str, side: str,
+                     qty: int, order_type: str, price: float,
+                     product: str = "NRML", validity: str = "DAY") -> dict:
+        feed = manager.router.feed_for(account_id)
+        stock_code = feed.scrip.stock_code_for(underlying) if feed is not None else None
+        if not stock_code:
+            # Never guess a stock_code — a wrong one is a wrong instrument.
+            return {"ok": False, "broker": "icici",
+                    "error": f"ICICI stock code for {underlying} is unknown "
+                             f"(scrip master not loaded yet) — reconnect the account"}
+        try:
+            expiry_iso = self._icici_expiry(expiry)
+        except ValueError:
+            return {"ok": False, "broker": "icici",
+                    "error": f"Unparseable expiry '{expiry}' for ICICI"}
+
+        if product != "NRML":
+            # Breeze exposes one options product; record the downgrade rather
+            # than silently routing an MIS order as carry-forward.
+            self._log("warn", f"[order] ICICI has no separate {product} product for "
+                              f"options — placing as 'options'")
+        params = {
+            "stock_code": stock_code,
+            "exchange_code": self._ICICI_EXCH.get(underlying, "NFO"),
+            "product": "options",
+            "action": side.lower(),                       # buy / sell
+            "order_type": order_type.lower(),             # market / limit
+            "quantity": str(int(qty)),
+            "price": str(price) if order_type == "LIMIT" else "",
+            "validity": "ioc" if validity == "IOC" else "day",
+            "expiry_date": expiry_iso,
+            "right": "call" if opt_type == "CE" else "put",
+            "strike_price": str(int(strike)),
+            "stoploss": "",
+        }
+        try:
+            resp = breeze.place_order(**params)
+        except Exception as e:
+            # An auth-shaped failure here must latch the account the same way a
+            # feed error does — the day-token dies for orders and data alike.
+            manager.session_manager.report_error(account_id, "icici", e)
+            raise
+
+        status = resp.get("Status") if isinstance(resp, dict) else None
+        err = resp.get("Error") if isinstance(resp, dict) else None
+        success = resp.get("Success") if isinstance(resp, dict) else None
+        if status != 200 or err or not success:
+            detail = err or f"ICICI rejected the order (status {status})"
+            manager.session_manager.report_error(account_id, "icici", detail)
+            return {"ok": False, "broker": "icici", "error": detail}
+        order_id = success.get("order_id") if isinstance(success, dict) else None
+        return {"ok": True, "broker": "icici", "orderId": order_id,
+                "tradingsymbol": f"{stock_code} {expiry} {int(strike)} {opt_type}"}
 
     # ── modify / cancel (paper → engine; live routing not yet ported) ──────
     def modify_order(self, order_id: str, price: float | None,

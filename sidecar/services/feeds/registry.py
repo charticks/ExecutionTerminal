@@ -13,12 +13,14 @@ from __future__ import annotations
 from .angel_feed import AngelFeed
 from .base import MarketFeed
 from .dhan_feed import DhanFeed
+from .icici_feed import ICICIFeed
 from .kotak_feed import KotakFeed
 
 FEEDS: dict[str, type[MarketFeed]] = {
     "angel": AngelFeed,
     "dhan": DhanFeed,
     "kotak": KotakFeed,
+    "icici": ICICIFeed,
 }
 
 

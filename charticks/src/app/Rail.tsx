@@ -4,7 +4,6 @@ import { useUiStore, type Screen } from "@/stores/useUiStore";
 const NAV: { screen: Screen; icon: string; label: string }[] = [
   { screen: "home", icon: "grid", label: "Home" },
   { screen: "orders", icon: "list", label: "Orders" },
-  { screen: "positions", icon: "trend", label: "Positions" },
   { screen: "strategies", icon: "cpu", label: "Strategies" },
   { screen: "brokers", icon: "link", label: "Brokers" },
 ];

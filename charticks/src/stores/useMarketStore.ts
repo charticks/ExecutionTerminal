@@ -81,7 +81,7 @@ export const useMarketStore = create<MarketState>((set) => ({
   connected: false,
   indices: {},
   positions: {},
-  brokers: { angel: "down", kotak: "down", dhan: "down" },
+  brokers: { angel: "down", kotak: "down", dhan: "down", icici: "down" },
   netPnl: 0,
   riskHalted: false,
   setConnected: (connected) => set({ connected }),

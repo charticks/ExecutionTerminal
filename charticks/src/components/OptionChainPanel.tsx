@@ -471,14 +471,14 @@ export function OptionChainPanel() {
   };
 
   /** "Modify Order" on the duplicate dialog: hand the existing order to the
-   *  Positions screen, which drops that row straight into edit mode. Nothing is
-   *  placed — saving there updates the existing order. */
+   *  Home position grid, which drops that row straight into edit mode. Nothing
+   *  is placed — saving there updates the existing order. */
   const modifyExisting = () => {
     const id = dupOrderId;
     setDupOrderId(null);
     if (!id) return;
     useUiStore.getState().setEditOrderId(id);
-    useUiStore.getState().setScreen("positions");
+    useUiStore.getState().setScreen("home");
   };
 
   /** Retry only the quantity that never reached the broker after a split order
