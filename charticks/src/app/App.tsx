@@ -11,7 +11,9 @@ import { connectMarketStore } from "@/stores/useMarketStore";
 import { connectBrokerStore } from "@/stores/useBrokerStore";
 import { startLiveChain } from "@/stores/useLiveChain";
 import { syncTradingMode } from "@/stores/useTradingModeStore";
+import { syncRiskConfig } from "@/stores/useRiskSync";
 import { startPaperSync } from "@/stores/paperSync";
+import { startLiveOrderSync } from "@/stores/liveOrderSync";
 import { bridge } from "@/bridge/client";
 import { InfoDialog } from "@/components/InfoDialog";
 import { MARKET_CLOSED_MESSAGE, MARKET_CLOSED_TITLE } from "@/lib/marketSession";
@@ -28,7 +30,9 @@ export function App() {
     connectBrokerStore();
     startLiveChain();
     syncTradingMode();
+    syncRiskConfig();
     startPaperSync();
+    startLiveOrderSync();
 
     // Network-up detection (absent before): the moment the OS regains
     // connectivity, ask the sidecar to force-reconnect the broker feed instead

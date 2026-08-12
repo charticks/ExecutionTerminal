@@ -49,21 +49,37 @@ python -m pip install --quiet ^
   pyotp==2.10.0 ^
   pytz ^
   logzero==1.7.0 ^
-  tkcalendar==1.6.1 ^
   smartapi-python==1.5.5 ^
   dhanhq==2.2.0 ^
-  neo-api-client==2.0.0 ^
   breeze-connect==1.0.69
 
 if errorlevel 1 goto INSTALLFAIL
+
+REM Kotak Neo is not on PyPI - it installs only from Kotak's GitHub, and its
+REM declared pins (websockets==8.1, asyncio==3.4.3) conflict with Dhan and
+REM uvicorn, so --no-deps is required. Needs git; skipped with a warning if
+REM absent, since the other three brokers still work without it.
+git --version >nul 2>&1
+if errorlevel 1 (
+  echo        Skipping Kotak Neo - git is not installed.
+  echo        Angel One, Dhan and ICICI Direct will still work.
+) else (
+  python -m pip install --quiet --no-deps ^
+    "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1"
+)
 
 echo.
 echo  Verifying...
 REM -I (isolated) keeps the current folder off sys.path. breeze_connect
 REM does a bare "import config" internally, so running this check from a
 REM folder that happens to contain a config.py would fail spuriously.
-python -I -c "import fastapi,uvicorn,pandas,pyotp,logzero,SmartApi,dhanhq,neo_api_client,breeze_connect" 2>nul
+python -I -c "import fastapi,uvicorn,pandas,pyotp,logzero,SmartApi,dhanhq,breeze_connect" 2>nul
 if errorlevel 1 goto VERIFYFAIL
+
+REM Kotak is optional (see above), so it is checked separately - a missing
+REM Kotak SDK must not report the whole setup as failed.
+python -I -c "import neo_api_client" 2>nul
+if errorlevel 1 echo        Note: Kotak Neo is not installed - the other three brokers are ready.
 
 echo.
 echo  ============================================

@@ -3,11 +3,17 @@ import { bridge } from "@/bridge/client";
 import { useOrdersStore } from "@/stores/useOrdersStore";
 import { usePositionsStore } from "@/stores/usePositionsStore";
 
-// Paper vs Live execution mode. Paper simulates fills client-side (the existing
-// mock order/position flow); Live routes real orders through the sidecar to the
-// connected broker(s). The sidecar holds its own authoritative copy of the mode
-// (set via POST /trading-mode) as a backstop so a stray order can never reach a
-// broker while in Paper. Persisted so the choice survives restarts.
+// Paper vs Live execution mode. Paper fills against the sidecar's tick-driven
+// paper engine; Live routes real orders to the brokers with Execute enabled.
+//
+// This store is the user's choice, and every order request carries it (see
+// useOrdersStore.placeOrder). The sidecar keeps its own confirmed copy purely to
+// cross-check that value — it routes on the mode in the request, and rejects
+// outright when the two disagree rather than picking one. So this store must
+// keep the sidecar's copy current: on startup, on every change, and on every
+// reconnect, since a sidecar restart resets its copy to paper.
+//
+// Persisted so the choice survives restarts.
 
 export type TradingMode = "paper" | "live";
 
@@ -31,9 +37,7 @@ export const useTradingModeStore = create<TradingModeState>((set) => ({
   setMode: (mode) => {
     localStorage.setItem(KEY, mode);
     set({ mode });
-    // Defense-in-depth: tell the sidecar so it refuses live placement unless it
-    // too is in live mode. Best-effort — the client also branches on `mode`.
-    bridge.post("/trading-mode", { mode }).catch(() => {});
+    pushMode(mode);
   },
   clearPaperSession: () => {
     // The sidecar paper engine is authoritative — reset it, then clear the
@@ -45,8 +49,25 @@ export const useTradingModeStore = create<TradingModeState>((set) => ({
   },
 }));
 
-// Push the persisted mode to the sidecar once at startup so server + client
-// agree before any order is placed.
+function pushMode(mode: TradingMode) {
+  bridge.post("/trading-mode", { mode }).catch(() => {});
+}
+
+/** Re-confirm the current mode with the sidecar. Safe to call at any time: it
+ *  only ever tells the sidecar what the user already selected and the badge
+ *  already shows. Called after a MODE_MISMATCH rejection so the user's next
+ *  attempt goes through — deliberately WITHOUT retrying the order itself, which
+ *  must stay a human decision. */
+export function resyncTradingMode() {
+  pushMode(useTradingModeStore.getState().mode);
+}
+
+/** Keep the sidecar's cross-check copy current: once at startup, and again on
+ *  every reconnect — a restarted sidecar comes back believing it is in paper,
+ *  which would otherwise reject every subsequent live order as a mismatch. */
 export function syncTradingMode() {
-  bridge.post("/trading-mode", { mode: useTradingModeStore.getState().mode }).catch(() => {});
+  resyncTradingMode();
+  bridge.onStatus((connected) => {
+    if (connected) resyncTradingMode();
+  });
 }

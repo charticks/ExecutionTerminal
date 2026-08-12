@@ -15,6 +15,8 @@ that uses them.
 """
 from __future__ import annotations
 
+import diagnostics
+
 import asyncio
 import threading
 from abc import ABC, abstractmethod
@@ -116,8 +118,12 @@ class AsyncioTransport(Transport):
             # entirely by on_close, so swallowing it strands the feed down.
             try:
                 cb.on_close()
-            except Exception:
-                pass
+            except Exception as exc:
+                # on_close drives the whole reconnect policy. If it throws, the
+                # feed is stranded down with nothing scheduled to retry — the
+                # single most consequential swallow in the reliability layer.
+                diagnostics.exception("websocket", "on_close handler failed",
+                                      exc_info=exc)
 
     def close(self) -> None:
         self._closing = True
@@ -127,8 +133,11 @@ class AsyncioTransport(Transport):
         try:
             fut = asyncio.run_coroutine_threadsafe(self.shutdown(), loop)
             fut.result(timeout=5)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Non-fatal — we stop the loop below regardless — but a shutdown
+            # that keeps timing out is how socket leaks start.
+            diagnostics.emit("websocket", "warn", "transport shutdown failed",
+                             error=str(exc))
         finally:
             try:
                 loop.call_soon_threadsafe(loop.stop)

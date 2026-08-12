@@ -15,8 +15,8 @@ this manager is credential-store agnostic: it authenticates with whatever it is
 handed, keeps sessions keyed by ``account_id``, and owns the connecting ->
 connected / down / session_expired health model for each account.
 
-Nothing in ``app/`` or ``engines/`` is modified; those remain usable by the
-legacy Tkinter app.
+The Tkinter app this was ported from is retired and frozen under ``legacy/``;
+the sidecar no longer imports from it or shares any state with it.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ import threading
 import time
 from typing import Any
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 
@@ -36,14 +37,11 @@ from services import expiry as expiry_filter
 from services.broker_limits import limit_resolver
 from services.instruments import InstrumentKey, instruments
 from services.feed_router import FeedRouter
+from services.paths import data_dir
 from services.reliability.session_manager import SessionManager
 from services.reliability.subscription_registry import SubscriptionRegistry
 from services.reliability.health_monitor import ConnectionHealthMonitor
 
-# Make the repo root importable (SDK deps live alongside the legacy app).
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
 
 SUPPORTED = ("angel", "kotak", "dhan", "icici")
 LABEL = {"angel": "Angel One", "kotak": "Kotak Neo", "dhan": "Dhan HQ",
@@ -76,6 +74,14 @@ class BrokerManager:
         # by that account refreshes the feed's tokens.
         self._market_account: str | None = None
         self.instrument_master: list[dict] = []
+        # Accounts opted in to receive LIVE orders, pushed by the renderer from
+        # the persisted broker config (POST /brokers/execute). Starts EMPTY on
+        # purpose: until the renderer has told us, live placement is refused
+        # rather than falling back to "every connected broker", which is the
+        # accidental-duplicate-order bug this set exists to prevent. The
+        # renderer re-pushes on every sidecar reconnect, so a sidecar restart
+        # self-heals within a moment instead of silently mis-routing.
+        self._execute_accounts: set[str] = set()
 
         # ── Reliability layer ───────────────────────────────────────────
         self.subscriptions = SubscriptionRegistry()
@@ -104,7 +110,8 @@ class BrokerManager:
 
     # ── logging / status helpers (replace tk side-effects) ────────────────
     def _log(self, level: str, msg: str) -> None:
-        hub.publish(events.log_line(level, msg))
+        # Persisted to broker.log + application.log AND streamed to the UI panel.
+        diagnostics.emit("broker", level, msg, publish=True)
 
     def _set_health(self, account_id: str, broker: str, health: str, detail: str | None = None) -> None:
         with self._lock:
@@ -131,6 +138,37 @@ class BrokerManager:
                 if self._health.get(aid) == CONNECTED
             ]
 
+    # ── execution selection (which accounts may receive LIVE orders) ───────
+    def set_execution_accounts(self, account_ids: list[str]) -> dict:
+        """Replace the execution set. Authoritative for live routing; the
+        Brokers page is the only thing that writes it."""
+        ids = {str(a) for a in (account_ids or []) if a}
+        with self._lock:
+            changed = ids != self._execute_accounts
+            self._execute_accounts = ids
+        if changed:
+            names = ", ".join(sorted(ids)) if ids else "none"
+            self._log("info", f"[broker] live execution accounts → {names}")
+        return {"ok": True, "accountIds": sorted(ids)}
+
+    def execution_accounts(self) -> set[str]:
+        """The opted-in set, regardless of connectivity. An empty set means the
+        user has not enabled execution anywhere — distinct from 'enabled but
+        nothing connected', which is a different error for the user."""
+        with self._lock:
+            return set(self._execute_accounts)
+
+    def execution_sessions(self) -> list[tuple[str, str, Any]]:
+        """(account_id, broker, session) for accounts that are BOTH connected
+        and opted in to execution. This — not connected_sessions() — is what
+        live order placement fans out over."""
+        with self._lock:
+            return [
+                (aid, self._broker.get(aid, ""), self._sessions[aid])
+                for aid in self._sessions
+                if self._health.get(aid) == CONNECTED and aid in self._execute_accounts
+            ]
+
     def snapshot_events(self) -> list[dict]:
         """Replayed to each newly-connected WS client so late joiners are correct."""
         with self._lock:
@@ -151,24 +189,41 @@ class BrokerManager:
         # A fresh session may carry different order limits — re-resolve them.
         limit_resolver.invalidate(account_id)
         self._set_health(account_id, broker, CONNECTING)
+        label = LABEL.get(broker, broker)
+        # Which credential fields arrived (NEVER their values) — "login failed"
+        # is most often a missing field, and this distinguishes that from a
+        # genuine auth rejection without ever putting a secret in a log file.
+        diagnostics.event("broker", "Broker login", "started", broker=label,
+                          account=account_id, credentialFields=",".join(sorted(creds)))
         try:
             # Every broker gets an EXPLICIT branch — no fallthrough. The old
             # trailing `return self._connect_dhan(...)` meant any broker added
             # to SUPPORTED without a branch here was silently handed to the
             # Dhan connector, credentials and all.
             if broker == "angel":
-                return self._connect_angel(account_id, creds)
-            if broker == "kotak":
-                return self._connect_kotak(account_id, creds)
-            if broker == "dhan":
-                return self._connect_dhan(account_id, creds)
-            if broker == "icici":
-                return self._connect_icici(account_id, creds)
-            self._set_health(account_id, broker, DOWN, "no connector implemented")
-            return {"ok": False, "error": f"no connector for broker '{broker}'"}
+                result = self._connect_angel(account_id, creds)
+            elif broker == "kotak":
+                result = self._connect_kotak(account_id, creds)
+            elif broker == "dhan":
+                result = self._connect_dhan(account_id, creds)
+            elif broker == "icici":
+                result = self._connect_icici(account_id, creds)
+            else:
+                self._set_health(account_id, broker, DOWN, "no connector implemented")
+                diagnostics.event("broker", "Broker login", "failed", broker=label,
+                                  account=account_id, reason="no connector implemented")
+                return {"ok": False, "error": f"no connector for broker '{broker}'"}
+            diagnostics.event(
+                "broker", "Broker login", "success" if result.get("ok") else "failed",
+                broker=label, account=account_id, reason=result.get("error"))
+            return result
         except Exception as exc:  # defensive
             self._set_health(account_id, broker, DOWN, str(exc))
-            self._log("error", f"❌ {LABEL.get(broker, broker)} connect crashed: {exc}")
+            self._log("error", f"❌ {label} connect crashed: {exc}")
+            # Trace, not just the message: a connector crash is a bug in us, and
+            # the message alone has never been enough to find one.
+            diagnostics.exception("broker", "Broker login crashed", exc_info=exc,
+                                  broker=label, account=diagnostics.mask_account(account_id))
             return {"ok": False, "error": str(exc)}
 
     def disconnect(self, account_id: str) -> dict:
@@ -417,8 +472,8 @@ class BrokerManager:
     def _connect_icici(self, account_id: str, creds: dict) -> dict:
         try:
             # NOT a plain `from breeze_connect import ...` — the SDK does a bare
-            # `import config` that collides with Charticks' own config.py on
-            # sys.path. See services.feeds.icici_feed.import_breeze.
+            # `import config` that resolves against whatever is on sys.path.
+            # See services.feeds.icici_feed.import_breeze.
             from services.feeds.icici_feed import import_breeze
             BreezeConnect = import_breeze()
         except ImportError as e:
@@ -471,8 +526,7 @@ class BrokerManager:
     # ── Instrument master (headless port of login.py:392-425) ─────────────
     def _load_master(self, smart: Any) -> None:
         import requests
-        cache_folder = os.path.join(_ROOT, "app", "data_cache")
-        os.makedirs(cache_folder, exist_ok=True)
+        cache_folder = data_dir()
         today = dt.datetime.now().strftime("%Y%m%d")
         file_name = os.path.join(cache_folder, f"instrument_master_{today}.json")
         if os.path.exists(file_name):
@@ -541,6 +595,67 @@ class BrokerManager:
         index is not one Charticks trades. Callers filtering the instrument
         master compare against this so unsupported names are skipped."""
         return self._OPT_EXCH.get((underlying or "").upper())
+
+    def feed_stale(self) -> bool:
+        """True when every running feed is down or silent (connected but no
+        ticks). Consulted before placing an entry: a market order priced off a
+        frozen feed, or an away-from-LTP check against a stale quote, is exactly
+        the kind of thing that only looks wrong afterwards.
+
+        Any one healthy feed is enough — the router will serve quotes from it.
+        """
+        try:
+            managers = list(self.router.ws_managers())
+        except Exception:
+            return False
+        running = [m for m in managers if getattr(m, "should_run", False)]
+        if not running:
+            return False
+        return all((not m.connected) or m.stale for m in running)
+
+    def option_meta(self, underlying: str, expiry: str, strike: float,
+                    opt_type: str) -> dict | None:
+        """Contract facts straight from the instrument master: lot size and tick
+        size. Returns None when the contract is not in a loaded master.
+
+        These were previously never read. Lot size was inferred by the ORDER
+        SPLITTER as ``qty / lots`` — i.e. taken from whatever the client sent —
+        so a client that miscounted sent a wrong-sized order to the broker with
+        nothing to catch it. Tick size was a hard-coded 0.05 everywhere.
+        """
+        underlying = (underlying or "").upper()
+        opt_type = (opt_type or "").upper()
+        exch = self._OPT_EXCH.get(underlying, "NFO")
+        target = int(strike)
+        for s in self.instrument_master:
+            if s.get("name", "").upper() != underlying:
+                continue
+            if s.get("expiry") != expiry or s.get("exch_seg", "") != exch:
+                continue
+            if "OPT" not in s.get("instrumenttype", ""):
+                continue
+            if not s.get("symbol", "").endswith(opt_type):
+                continue
+            try:
+                if int(float(s.get("strike", 0)) / 100) != target:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            def _num(key: str) -> float | None:
+                try:
+                    value = float(s.get(key) or 0)
+                except (TypeError, ValueError):
+                    return None
+                return value if value > 0 else None
+            lot = _num("lotsize")
+            # Angel publishes tick_size in paise (5 = ₹0.05).
+            tick = _num("tick_size")
+            return {
+                "lotSize": int(lot) if lot else None,
+                "tickSize": round(tick / 100.0, 4) if tick else None,
+                "tradingsymbol": s.get("symbol", ""),
+            }
+        return None
 
     def resolve_option(self, underlying: str, expiry: str, strike: float,
                        opt_type: str) -> tuple[str, str | None, str]:

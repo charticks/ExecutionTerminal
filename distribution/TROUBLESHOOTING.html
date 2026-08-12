@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charticks 0.1.0 — Troubleshooting</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1c2430; --muted:#5b6673; --line:#dfe4ea;
+    --accent:#1f3864; --warn-bg:#fff4d6; --warn-line:#e0a800;
+    --danger-bg:#fdecea; --danger-line:#c0392b; --ok-bg:#e9f6ec; --ok-line:#2e7d43;
+    --code-bg:#f2f4f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:2.5rem 1.25rem 4rem;
+    font:16px/1.65 "Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+    color:var(--fg);background:var(--bg)}
+  .wrap{max-width:860px;margin:0 auto}
+  h1{font-size:1.9rem;margin:0 0 .2rem;color:var(--accent)}
+  .sub{color:var(--muted);margin:0 0 2rem}
+  h2{font-size:1.25rem;margin:2.4rem 0 .7rem;color:var(--accent);
+     border-bottom:2px solid var(--line);padding-bottom:.35rem}
+  ol{padding-left:1.3rem}li{margin:.5rem 0}
+  code{background:var(--code-bg);padding:.12em .4em;border-radius:3px;
+     font:.92em ui-monospace,Consolas,monospace;word-break:break-all}
+  .box{border-left:5px solid var(--line);background:#f7f9fb;padding:.9rem 1.1rem;
+     border-radius:0 6px 6px 0;margin:1.2rem 0}
+  .warn{border-left-color:var(--warn-line);background:var(--warn-bg)}
+  .danger{border-left-color:var(--danger-line);background:var(--danger-bg)}
+  .ok{border-left-color:var(--ok-line);background:var(--ok-bg)}
+  .box p{margin:.4rem 0}.box p:first-child{margin-top:0}.box p:last-child{margin-bottom:0}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.94rem}
+  th,td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}
+  th{background:#eef1f5}
+  .pathbox{background:var(--code-bg);border:1px solid var(--line);border-radius:6px;
+     padding:.8rem 1rem;margin:.8rem 0;font:0.95em ui-monospace,Consolas,monospace;
+     word-break:break-all}
+  footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
+     color:var(--muted);font-size:.88rem}
+  a{color:var(--accent)}
+  @media print{body{padding:0}.box{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Troubleshooting</h1>
+<p class="sub">Charticks 0.1.0 · Common problems and what to send when reporting one</p>
+
+<h2>Quick answers</h2>
+
+<table>
+  <tr><th>What you see</th><th>What it usually means</th><th>What to do</th></tr>
+  <tr>
+    <td>“Windows protected your PC” on install</td>
+    <td>The build is not code-signed.</td>
+    <td>Click <strong>More info</strong> → <strong>Run anyway</strong>. Expected.</td>
+  </tr>
+  <tr>
+    <td>Window opens but everything is blank or zero</td>
+    <td>No broker connected.</td>
+    <td>Brokers screen → Add Broker → Connect. See
+        <a href="BROKER-SETUP.html">BROKER-SETUP.html</a>.</td>
+  </tr>
+  <tr>
+    <td>Prices show but never change</td>
+    <td>Market is closed, or it is a trading holiday.</td>
+    <td>Try 09:15–15:30 IST on a weekday. The app has no holiday calendar.</td>
+  </tr>
+  <tr>
+    <td>Broker dot is red</td>
+    <td>Login failed.</td>
+    <td>Re-check credentials. ICICI session keys expire daily.</td>
+  </tr>
+  <tr>
+    <td>Broker dot is amber</td>
+    <td>Connecting, or session expired.</td>
+    <td>Wait a few seconds, then Disconnect and Connect again.</td>
+  </tr>
+  <tr>
+    <td>Order fails: <code>AG7002 … not a registered IP</code></td>
+    <td>Your public IP is not whitelisted at Angel.</td>
+    <td>Whitelist it on your SmartAPI app. See
+        <a href="BROKER-SETUP.html">BROKER-SETUP.html</a>.</td>
+  </tr>
+  <tr>
+    <td>Edited credentials but nothing changed</td>
+    <td>The engine still holds the old ones.</td>
+    <td>Disconnect the account, then Connect again.</td>
+  </tr>
+  <tr>
+    <td>Order shows <strong>OPEN</strong>, not EXECUTED</td>
+    <td>Correct. The broker accepted it but has not filled it yet.</td>
+    <td>Wait. It becomes EXECUTED or REJECTED once the broker decides.</td>
+  </tr>
+  <tr>
+    <td>Order shows <strong>REJECTED — Insufficient funds</strong></td>
+    <td>Your broker refused the order. Nothing was bought or sold.</td>
+    <td>Add funds or trade fewer lots. No position is created — that is correct,
+        not a missing position.</td>
+  </tr>
+  <tr>
+    <td>Live position doesn't appear right after the order</td>
+    <td>Live positions are read from your broker every ~4 seconds.</td>
+    <td>Wait a few seconds — but first check the order actually says EXECUTED,
+        not OPEN or REJECTED.</td>
+  </tr>
+  <tr>
+    <td>Live position still missing after ~10 seconds</td>
+    <td>The app could not read it from your broker.</td>
+    <td>Check it exists in your broker's own Positions screen, then send
+        <code>sidecar.log</code> (below).</td>
+  </tr>
+  <tr>
+    <td>“Position still open — …” after clicking Close</td>
+    <td>The broker rejected the closing order.</td>
+    <td>The position is <strong>still open</strong>. Read the reason shown, and
+        close it in your broker's terminal if unsure.</td>
+  </tr>
+  <tr>
+    <td>Stop Loss / Target not firing on a live position</td>
+    <td>Not a fault — automatic exits do not work in Live yet.</td>
+    <td>Close manually, or set the stop in your broker's terminal. See
+        <a href="KNOWN-LIMITATIONS.html">KNOWN-LIMITATIONS.html</a>.</td>
+  </tr>
+  <tr>
+    <td>App window is blank / white</td>
+    <td>The engine did not start.</td>
+    <td>Close it fully and reopen. If it persists, send the log (below).</td>
+  </tr>
+</table>
+
+<h2>Where the log files are</h2>
+
+<p>Paste this into the File Explorer address bar:</p>
+
+<div class="pathbox">%APPDATA%\charticks\logs</div>
+
+<p>Inside are date-named folders. Send the <strong>newest</strong> one. It holds two files
+and both are useful:</p>
+
+<table>
+  <tr><th>File</th><th>What it contains</th></tr>
+  <tr>
+    <td><code>sidecar.log</code></td>
+    <td>What the app's engine decided — feed problems, rejected orders, why a
+        position did or did not appear. <strong>Send this one first.</strong></td>
+  </tr>
+  <tr>
+    <td><code>app.log</code></td>
+    <td>Raw broker API errors from the Angel library.</td>
+  </tr>
+</table>
+
+<div class="box warn">
+  <p><strong>If you were given an older instruction pointing at</strong>
+  <code>%LOCALAPPDATA%\Programs\charticks\resources\sidecar\logs</code> —
+  that path is out of date and will be empty. Use the one above.</p>
+</div>
+
+<h2>A live position is missing from the Positions grid</h2>
+
+<p>The app reads live positions from your broker every ~4 seconds, so they are never
+instant. Work through these:</p>
+
+<ol>
+  <li><strong>Check the order status first.</strong> In the app's Order Book the order
+      must read <strong>EXECUTED</strong>. <strong>OPEN</strong> means the broker has it
+      but has not filled it. <strong>REJECTED</strong> means the broker refused it — the
+      reason is printed under the status, and there is correctly no position.</li>
+  <li><strong>Wait ~10 seconds</strong> and look again.</li>
+  <li><strong>Is the Positions panel in the right mode?</strong> The panel follows the
+      Paper/Live switch, not the broker connection. Live positions only show in Live.</li>
+  <li>Still missing while your broker clearly shows it — send <code>sidecar.log</code>.
+      It records exactly what the broker returned and why a row was skipped.</li>
+</ol>
+
+<h2>The app opens but shows no data at all</h2>
+
+<p>Work through these in order:</p>
+
+<ol>
+  <li><strong>Is a broker connected?</strong> Brokers screen — the dot must be green.
+      No connection means no data; the app has no prices of its own.</li>
+  <li><strong>Is the market open?</strong> 09:15–15:30 IST, Monday to Friday.</li>
+  <li><strong>Is it a holiday?</strong> The app cannot tell. Check the exchange calendar.</li>
+  <li><strong>Restart the app.</strong> Close it completely and reopen.</li>
+  <li>Still nothing — send the log folder and a screenshot.</li>
+</ol>
+
+<div class="box">
+  <p><strong>You do not need Python.</strong> If anyone suggests installing Python or running
+  <code>setup-tester.bat</code>, that advice is for an older build. Version 0.1.0 has the
+  engine built in. A missing Python installation cannot be the cause of any problem here.</p>
+</div>
+
+<h2>Checking the engine is alive (advanced)</h2>
+
+<p>The trading engine runs locally on port <code>8787</code> and accepts connections only
+from your own machine. To confirm it is running, open PowerShell and run:</p>
+
+<div class="pathbox">Invoke-WebRequest http://127.0.0.1:8787/health -UseBasicParsing</div>
+
+<p>A healthy engine replies:</p>
+
+<div class="pathbox">{"ok":true,"service":"charticks-sidecar","version":"0.1.0"}</div>
+
+<p>If that fails while the app is open, the engine crashed — send the log folder.</p>
+
+<h2>Starting completely fresh</h2>
+
+<p>To wipe saved accounts and settings and start as if newly installed:</p>
+
+<ol>
+  <li>Close Charticks completely.</li>
+  <li>Open <code>%APPDATA%\charticks</code>.</li>
+  <li>Delete <code>brokers.json</code> (this removes your saved broker accounts).</li>
+  <li>Reopen the app and add your account again.</li>
+</ol>
+
+<h2>Reporting a problem</h2>
+
+<p>Send these three things — it makes issues far quicker to fix:</p>
+
+<ol>
+  <li>A screenshot of the <strong>whole</strong> window</li>
+  <li>What you did immediately before it went wrong</li>
+  <li>The newest folder from <code>%APPDATA%\charticks\logs</code></li>
+</ol>
+
+<div class="box danger">
+  <p><strong>Report these immediately, and stop trading if you see one:</strong></p>
+  <p>• A position at your broker that the app does not show, or the reverse<br>
+     • An order the app calls successful that your broker has no record of<br>
+     • Any order you did not place<br>
+     • Quantity, side or product differing between the app and your broker</p>
+  <p>Square off in your broker's terminal first, then report it.</p>
+</div>
+
+<div class="box warn">
+  <p><strong>Before sending anything:</strong> crop or blur every screenshot and check that
+  no API key, PIN, token or TOTP secret is visible. Log files have been seen to contain an
+  Angel API key on certain errors — if you are unsure, say so when you send them, and rotate
+  the key at your broker.</p>
+</div>
+
+<footer>
+  Charticks 0.1.0 · Test build · Engine on 127.0.0.1:8787, local only.
+</footer>
+
+</div>
+</body>
+</html>

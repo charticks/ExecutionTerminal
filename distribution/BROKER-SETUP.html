@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charticks 0.1.0 — Connecting Your Broker</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1c2430; --muted:#5b6673; --line:#dfe4ea;
+    --accent:#1f3864; --warn-bg:#fff4d6; --warn-line:#e0a800;
+    --danger-bg:#fdecea; --danger-line:#c0392b; --ok-bg:#e9f6ec; --ok-line:#2e7d43;
+    --code-bg:#f2f4f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:2.5rem 1.25rem 4rem;
+    font:16px/1.65 "Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+    color:var(--fg);background:var(--bg)}
+  .wrap{max-width:820px;margin:0 auto}
+  h1{font-size:1.9rem;margin:0 0 .2rem;color:var(--accent)}
+  .sub{color:var(--muted);margin:0 0 2rem}
+  h2{font-size:1.25rem;margin:2.4rem 0 .7rem;color:var(--accent);
+     border-bottom:2px solid var(--line);padding-bottom:.35rem}
+  h3{font-size:1.05rem;margin:1.6rem 0 .4rem}
+  ol{padding-left:1.3rem}li{margin:.55rem 0}
+  code{background:var(--code-bg);padding:.12em .4em;border-radius:3px;
+     font:.92em ui-monospace,Consolas,monospace}
+  .box{border-left:5px solid var(--line);background:#f7f9fb;padding:.9rem 1.1rem;
+     border-radius:0 6px 6px 0;margin:1.2rem 0}
+  .warn{border-left-color:var(--warn-line);background:var(--warn-bg)}
+  .danger{border-left-color:var(--danger-line);background:var(--danger-bg)}
+  .ok{border-left-color:var(--ok-line);background:var(--ok-bg)}
+  .box p{margin:.4rem 0}.box p:first-child{margin-top:0}.box p:last-child{margin-bottom:0}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.95rem}
+  th,td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}
+  th{background:#eef1f5}
+  .dot{display:inline-block;width:.7em;height:.7em;border-radius:50%;margin-right:.35em}
+  .g{background:#2e7d43}.o{background:#e0a800}.r{background:#c0392b}
+  footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
+     color:var(--muted);font-size:.88rem}
+  a{color:var(--accent)}
+  @media print{body{padding:0}.box{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Connecting Your Broker</h1>
+<p class="sub">Charticks 0.1.0 · Adding an account and getting live prices</p>
+
+<div class="box ok">
+  <p><strong>The app ships with no accounts.</strong> An empty Brokers screen on first launch
+  is correct, not a fault. Every user enters their own credentials, and they are encrypted
+  on your machine using Windows' own protection — they never leave it except to log in to
+  your broker.</p>
+</div>
+
+<h2>Step 1 — Add your account</h2>
+<ol>
+  <li>Open the <strong>Brokers</strong> screen from the left rail.</li>
+  <li>Click <strong>Add Broker</strong>.</li>
+  <li>Choose your broker and give the account a nickname (anything you like).</li>
+  <li>Fill in the credentials — see the table below for what each broker needs.</li>
+  <li>Click <strong>Save</strong>, then select the account and click <strong>Connect</strong>.</li>
+</ol>
+
+<p>The status dot should turn <span class="dot g"></span><strong>green</strong>.</p>
+
+<table>
+  <tr><th>Status</th><th>Meaning</th></tr>
+  <tr><td><span class="dot g"></span>Green</td><td>Connected and streaming.</td></tr>
+  <tr><td><span class="dot o"></span>Amber</td><td>Connecting, or the session expired and needs a re-login.</td></tr>
+  <tr><td><span class="dot r"></span>Red</td><td>Login failed. Check the credentials.</td></tr>
+</table>
+
+<h2>What each broker needs</h2>
+
+<table>
+  <tr><th>Broker</th><th>Fields</th></tr>
+  <tr>
+    <td><strong>Angel One</strong></td>
+    <td>API Key, Client ID, PIN, TOTP Secret</td>
+  </tr>
+  <tr>
+    <td><strong>Kotak Neo</strong></td>
+    <td>Consumer Key, Mobile No. (<code>+91…</code>), UCC, MPIN, TOTP Secret</td>
+  </tr>
+  <tr>
+    <td><strong>Dhan HQ</strong></td>
+    <td>Client ID, Access Token</td>
+  </tr>
+  <tr>
+    <td><strong>ICICI Direct</strong></td>
+    <td>API Key, API Secret — then use the <strong>Log in with ICICI</strong> button.
+        The session key is issued by a browser login and <strong>expires daily</strong>,
+        so this one needs redoing each morning.</td>
+  </tr>
+</table>
+
+<p>The <strong>TOTP Secret</strong> is the long text string your broker showed you when you
+enabled two-factor authentication — not the 6-digit code. The app generates the 6-digit code
+itself at each login.</p>
+
+<h2>Angel One — whitelist your IP first</h2>
+
+<div class="box danger">
+  <p><strong>This step is not optional.</strong> Angel rejects every order from an
+  unregistered IP address with:</p>
+  <p><code>AG7002 — "&lt;your ip&gt; is not a registered IP, please check your registered IP."</code></p>
+  <p>Market data still works, so everything looks fine until your first order fails.</p>
+</div>
+
+<ol>
+  <li>Find your public IP — search “what is my IP” in a browser.</li>
+  <li>Log in to the Angel SmartAPI dashboard where you created your API app.</li>
+  <li>Add that IP to the app's whitelist and save.</li>
+  <li>Reconnect the account in Charticks.</li>
+</ol>
+
+<div class="box warn">
+  <p><strong>If your IP changes, orders stop working.</strong> Mobile hotspots, 4G/5G
+  dongles and some home broadband (CGNAT) hand out a different IP regularly — sometimes
+  daily. If orders suddenly start failing, re-check your IP before assuming the app broke.</p>
+  <p>A fixed/static connection is strongly preferred for live trading.</p>
+</div>
+
+<h2>Step 2 — Check you are getting data</h2>
+
+<p>With a green dot you should see:</p>
+<ul>
+  <li>Index tiles (NIFTY, BANKNIFTY…) showing prices that <strong>change</strong></li>
+  <li>The Option Chain listing strikes with Call and Put prices</li>
+</ul>
+
+<p>If prices appear but never move, the market is probably closed. Indian equity
+derivatives trade <strong>09:15 – 15:30 IST, Monday to Friday</strong>. The app has no
+holiday calendar, so on a trading holiday it will look open but nothing will move.</p>
+
+<h2>Changing credentials later</h2>
+
+<p>Select the account → <strong>Manage</strong> → <strong>Edit Credentials</strong>. You can
+also Rename or Delete an account from the same menu.</p>
+
+<div class="box warn">
+  <p><strong>After editing credentials, disconnect and reconnect the account.</strong> The
+  running engine keeps using the old credentials until you do — so a corrected PIN or TOTP
+  secret will appear to save successfully and change nothing.</p>
+</div>
+
+<h2>Keeping your credentials safe</h2>
+
+<ul>
+  <li>Secrets are masked in the UI and encrypted at rest at
+      <code>%APPDATA%\charticks\brokers.json</code>.</li>
+  <li><strong>Never share a screenshot showing credentials.</strong> Crop or blur them first.</li>
+  <li>Use a test account with limited funds while evaluating this build.</li>
+  <li>If you ever suspect a key was exposed, rotate it at your broker immediately.</li>
+</ul>
+
+<div class="box danger">
+  <p><strong>Before placing a live order</strong>, read
+  <a href="KNOWN-LIMITATIONS.html">KNOWN-LIMITATIONS.html</a>. You can open and close live
+  positions from the app, but <strong>Stop Loss and Target do not act on them</strong> —
+  nothing exits automatically.</p>
+</div>
+
+<footer>
+  Charticks 0.1.0 · Angel One: live entry and close. ICICI Direct: live entry only —
+  close in ICICI's own terminal. Kotak Neo and Dhan: market data only in this build.
+</footer>
+
+</div>
+</body>
+</html>

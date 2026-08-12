@@ -1,8 +1,8 @@
-import { app, BrowserWindow, ipcMain, safeStorage, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 // vite-plugin-electron injects this in dev; absent in packaged builds.
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
@@ -32,6 +32,24 @@ function sidecarDir(): string {
 }
 
 /**
+ * The Python that runs the trading engine.
+ *
+ * Packaged builds ship their own interpreter at `resources/python` (assembled
+ * by scripts/build-runtime.mjs), so nothing needs installing on the user's
+ * machine. Falling back to a PATH `python` keeps a runtime-less build working
+ * for anyone who has Python already — and keeps the missing-Python dialog
+ * meaningful rather than the app failing silently.
+ */
+function pythonExecutable(): string {
+  if (!isDev) {
+    const bundled = join(process.resourcesPath, "python",
+                         process.platform === "win32" ? "python.exe" : "bin/python3");
+    if (existsSync(bundled)) return bundled;
+  }
+  return process.platform === "win32" ? "python" : "python3";
+}
+
+/**
  * In dev we let `npm run dev:sidecar` (uvicorn --reload) own the process, so
  * main.ts does not spawn a second one. In packaged builds we spawn it here.
  */
@@ -41,7 +59,7 @@ function startSidecar() {
     return;
   }
   const cwd = sidecarDir();
-  const python = process.platform === "win32" ? "python" : "python3";
+  const python = pythonExecutable();
   const entry = join(cwd, "server.py");
   if (!existsSync(entry)) {
     console.error("[sidecar] server.py not found at", entry);
@@ -49,20 +67,99 @@ function startSidecar() {
   }
   sidecar = spawn(
     python,
-    ["-m", "uvicorn", "server:app", "--host", SIDECAR_HOST, "--port", String(SIDECAR_PORT)],
+    // --app-dir, not cwd: the bundled embeddable Python runs in isolated mode
+    // (its pythonNNN._pth fully determines sys.path), so the working directory
+    // is NOT importable and PYTHONPATH is ignored. Without this, `server:app`
+    // fails to resolve on a packaged build even though it works in dev.
+    ["-m", "uvicorn", "server:app", "--app-dir", cwd,
+     "--host", SIDECAR_HOST, "--port", String(SIDECAR_PORT)],
     {
       cwd,
-      env: { ...process.env, CHARTICKS_BRIDGE_TOKEN: BRIDGE_TOKEN },
+      env: {
+        ...process.env,
+        CHARTICKS_BRIDGE_TOKEN: BRIDGE_TOKEN,
+        // Instrument / scrip masters are ~100 MB a day and must not be written
+        // into the install directory, which may be read-only and is wiped on
+        // reinstall. See sidecar/services/paths.py.
+        CHARTICKS_DATA_DIR: app.getPath("userData"),
+        CHARTICKS_LOG_DIR: app.getPath("userData"),
+        // Broker SDKs print ₹ and other non-ASCII; without this Python's
+        // Windows console encoding raises UnicodeEncodeError mid-write and
+        // takes the log line (or the handler) down with it.
+        PYTHONIOENCODING: "utf-8",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     }
   );
-  sidecar.stdout?.on("data", (d) => console.log("[sidecar]", d.toString().trim()));
-  sidecar.stderr?.on("data", (d) => console.error("[sidecar]", d.toString().trim()));
+  // Anything the sidecar prints before its own logging is up — an import error,
+  // a missing dependency, a uvicorn bind failure — only exists here. In a
+  // packaged build console.log goes nowhere, so mirror it to a file.
+  sidecar.stdout?.on("data", (d) => writeSidecarOutput("out", d.toString()));
+  sidecar.stderr?.on("data", (d) => writeSidecarOutput("err", d.toString()));
+  // ENOENT (Python not installed / not on PATH) arrives here, NOT as an 'exit'.
+  // Without this listener Node throws on the unhandled 'error' event, the app
+  // sits on "Connecting…" forever, and nothing is written anywhere — which is
+  // precisely the failure a machine without Python produces.
+  sidecar.on("error", (err: NodeJS.ErrnoException) => {
+    const missing = err.code === "ENOENT";
+    writeSidecarOutput("err",
+      missing
+        ? `could not start the trading engine: '${python}' was not found on PATH. ` +
+          `Python is required and is not bundled with this build.`
+        : `could not start the trading engine: ${err.message}`);
+    win?.webContents.send("bridge:sidecar-status", { alive: false });
+    if (missing) reportMissingPython();
+  });
   sidecar.on("exit", (code) => {
-    console.error(`[sidecar] exited (code ${code})`);
+    writeSidecarOutput("err", `sidecar exited (code ${code})`);
     win?.webContents.send("bridge:sidecar-status", { alive: false });
     if (!quitting) scheduleSidecarRestart();
   });
+}
+
+/**
+ * Tell the user, once, that the Python runtime is missing — the one failure
+ * they can actually fix themselves. Retrying silently would leave the app
+ * looking merely slow rather than misconfigured.
+ */
+let reportedMissingPython = false;
+function reportMissingPython() {
+  if (reportedMissingPython) return;
+  reportedMissingPython = true;
+  quitting = true; // stop the restart loop; retrying will not find Python either
+  dialog.showErrorBox(
+    "Charticks cannot start its trading engine",
+    "Charticks needs Python to run its trading engine, and it was not found " +
+      "on this PC.\n\n" +
+      "1. Install Python 3.12 from python.org\n" +
+      '2. On the first installer screen, tick "Add python.exe to PATH"\n' +
+      "3. Run setup-tester.bat from the Charticks folder\n" +
+      "4. Start Charticks again\n\n" +
+      "Details were written to logs\\sidecar-process.log in:\n" +
+      app.getPath("userData"),
+  );
+}
+
+/**
+ * Append sidecar stdout/stderr to logs/sidecar-process.log, next to the log
+ * files the sidecar writes itself. This is the only record of a sidecar that
+ * dies before it can start its own logging — previously that failure produced
+ * nothing at all in a packaged build.
+ */
+function writeSidecarOutput(stream: "out" | "err", chunk: string) {
+  const text = chunk.trimEnd();
+  if (!text) return;
+  if (stream === "err") console.error("[sidecar]", text);
+  else console.log("[sidecar]", text);
+  try {
+    const dir = join(app.getPath("userData"), "logs");
+    mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString();
+    const line = text.split("\n").map((l) => `${stamp} | ${stream} | ${l}`).join("\n");
+    appendFileSync(join(dir, "sidecar-process.log"), line + "\n", "utf-8");
+  } catch {
+    // Logging must never take the app down; the console copy above survives.
+  }
 }
 
 function scheduleSidecarRestart() {
@@ -131,6 +228,12 @@ interface StoredAccount {
   autoConnect: boolean;
   secretsEnc: string; // base64 — safeStorage ciphertext, or plaintext JSON if enc unavailable
   enc: boolean; // whether secretsEnc is actually encrypted
+  // Whether LIVE orders may be routed to this account. Deliberately separate
+  // from autoConnect: connecting a broker gets you market data and account
+  // services, executing on it is an explicit second opt-in. Optional so a store
+  // written before this field reads back as "no execution" rather than
+  // inheriting the old route-to-every-connected-broker behaviour.
+  execute?: boolean;
 }
 interface StoreFile {
   accounts: StoredAccount[];
@@ -179,41 +282,8 @@ const sanitize = (a: StoredAccount) => ({
   broker: a.broker,
   nickname: a.nickname,
   autoConnect: a.autoConnect,
+  execute: !!a.execute,
 });
-
-/** One-time seed from the repo-root config.py so existing users keep their
- *  primary accounts without re-entering credentials. Best-effort regex parse. */
-function migrateFromConfigPy(): void {
-  const store = readStore();
-  if (store.accounts.length > 0) return;
-  const configPath = isDev
-    ? join(__dirname, "..", "..", "config.py")
-    : join(process.resourcesPath, "config.py");
-  if (!existsSync(configPath)) return;
-  let text = "";
-  try {
-    text = readFileSync(configPath, "utf-8");
-  } catch {
-    return;
-  }
-  const val = (key: string): string => {
-    const m = text.match(new RegExp(`^\\s*${key}\\s*=\\s*["']([^"']*)["']`, "m"));
-    return m ? m[1] : "";
-  };
-  const seeded: StoredAccount[] = [];
-  const add = (broker: BrokerId, creds: Record<string, string>, required: string[]) => {
-    if (!required.every((k) => creds[k])) return;
-    const { secretsEnc, enc } = encryptSecrets(creds);
-    seeded.push({ id: randomUUID(), broker, nickname: "Primary", autoConnect: false, secretsEnc, enc });
-  };
-  add("angel", { apiKey: val("API_KEY"), clientId: val("CLIENT_ID"), pin: val("PIN"), totpSecret: val("TOTP_SECRET") }, ["apiKey", "clientId"]);
-  add("kotak", { consumerKey: val("KOTAK_CONSUMER_KEY"), mobile: val("KOTAK_MOBILE_NO"), ucc: val("KOTAK_UCC"), mpin: val("KOTAK_MPIN"), totpSecret: val("KOTAK_TOTP_SECRET") }, ["consumerKey", "ucc"]);
-  add("dhan", { clientId: val("DHAN_CLIENT_ID"), accessToken: val("DHAN_ACCESS_TOKEN") }, ["clientId"]);
-  // sessionToken is deliberately NOT seeded: ICICI's expires daily and is only
-  // ever obtained through the login popup below.
-  add("icici", { apiKey: val("ICICI_API_KEY"), apiSecret: val("ICICI_API_SECRET"), sessionToken: "" }, ["apiKey", "apiSecret"]);
-  if (seeded.length) writeStore({ accounts: seeded });
-}
 
 ipcMain.handle("brokers:list", () => readStore().accounts.map(sanitize));
 
@@ -233,12 +303,13 @@ ipcMain.handle("brokers:add", (_e, payload: { broker: BrokerId; nickname: string
   return sanitize(acct);
 });
 
-ipcMain.handle("brokers:update", (_e, id: string, patch: { nickname?: string; autoConnect?: boolean; credentials?: Record<string, string> }) => {
+ipcMain.handle("brokers:update", (_e, id: string, patch: { nickname?: string; autoConnect?: boolean; execute?: boolean; credentials?: Record<string, string> }) => {
   const store = readStore();
   const acct = store.accounts.find((a) => a.id === id);
   if (!acct) return { ok: false, error: "account not found" };
   if (patch.nickname !== undefined) acct.nickname = patch.nickname;
   if (patch.autoConnect !== undefined) acct.autoConnect = patch.autoConnect;
+  if (patch.execute !== undefined) acct.execute = patch.execute;
   if (patch.credentials) {
     const { secretsEnc, enc } = encryptSecrets(patch.credentials);
     acct.secretsEnc = secretsEnc;
@@ -393,7 +464,6 @@ ipcMain.handle("icici:login", async (_e, apiKey: string): Promise<{ ok: boolean;
 });
 
 app.whenReady().then(() => {
-  migrateFromConfigPy();
   startSidecar();
   createWindow();
   app.on("activate", () => {

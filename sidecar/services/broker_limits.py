@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 
@@ -38,10 +39,20 @@ class OrderLimits:
     source: str = "default"  # "api" | "config" | "default"
 
     def cap_qty(self, lot_size: int) -> int | None:
-        """The effective per-order quantity cap, folding both dimensions together.
-        None means "no cap" (send the order whole)."""
+        """The effective per-order quantity cap for the SPLITTER, folding both
+        dimensions together. None means "send the order whole"."""
         if not self.supports_splitting:
             return None
+        return self.hard_cap_qty(lot_size)
+
+    def hard_cap_qty(self, lot_size: int) -> int | None:
+        """The exchange freeze cap itself, regardless of whether this broker can
+        split to stay under it.
+
+        cap_qty() returns None when splitting is unsupported, which is right for
+        the splitter but hid the limit from validation: an oversized order at a
+        non-splitting broker was sent whole for the exchange to reject.
+        """
         caps = []
         if self.max_lots_per_order and lot_size > 0:
             caps.append(int(self.max_lots_per_order) * int(lot_size))
@@ -151,8 +162,8 @@ class BrokerLimitResolver:
 
     def _log(self, level: str, msg: str) -> None:
         try:
-            hub.publish(events.log_line(level, msg))
-        except Exception:
+            diagnostics.emit("broker", level, msg, publish=True)
+        except Exception:  # logging must never break limit resolution
             pass
 
 

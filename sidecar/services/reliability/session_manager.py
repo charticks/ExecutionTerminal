@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 
@@ -49,7 +50,7 @@ class SessionManager:
         self._lock = threading.Lock()
 
     def _log(self, level: str, msg: str) -> None:
-        hub.publish(events.log_line(level, msg))
+        diagnostics.emit("broker", level, msg, publish=True)
 
     def report_error(self, account_id: str, broker: str, exc: Any) -> str:
         """Classify `exc` and, if it's a dead session, kick off recovery.

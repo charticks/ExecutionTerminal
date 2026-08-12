@@ -321,6 +321,74 @@ export function RenameDialog({
   );
 }
 
+// ── Multi-broker execution confirmation ────────────────────────────────────
+// Shown once, when the user goes from one execution broker to more than one.
+// Muted permanently by "Don't show again" — a preference, not a secret, so
+// localStorage alongside the other UI prefs is the right home for it.
+const MULTI_EXEC_ACK_KEY = "ck.multiExecAck";
+
+export function multiExecuteAcknowledged(): boolean {
+  try {
+    return localStorage.getItem(MULTI_EXEC_ACK_KEY) === "1";
+  } catch {
+    return false; // private mode / storage disabled — safer to keep asking
+  }
+}
+
+function acknowledgeMultiExecute() {
+  try {
+    localStorage.setItem(MULTI_EXEC_ACK_KEY, "1");
+  } catch {
+    /* preference simply won't stick */
+  }
+}
+
+/** Confirm enabling live execution on a second (or further) broker — every
+ *  future live order will then be placed on all of them. */
+export function MultiExecuteDialog({
+  account,
+  onConfirm,
+  onCancel,
+}: {
+  account: BrokerAccount;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const [dontAsk, setDontAsk] = useState(false);
+  useEscape(onCancel);
+
+  const confirm = () => {
+    if (dontAsk) acknowledgeMultiExecute();
+    onConfirm();
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onCancel}>
+      <div className="modal" role="alertdialog" aria-modal="true"
+           aria-label="Enable execution on multiple brokers"
+           onMouseDown={(e) => e.stopPropagation()}>
+        <h4>Enable Execution on Multiple Brokers?</h4>
+        <p>
+          You are enabling live execution on <b>{displayName(account)}</b> as well.
+        </p>
+        <p className="modal-note">
+          Future live orders will be placed on <b>all</b> selected brokers — the
+          full quantity on each, not split between them.
+        </p>
+        <label className="fld-check">
+          <input type="checkbox" checked={dontAsk}
+                 onChange={(e) => setDontAsk(e.target.checked)} />
+          <span>Don't show again</span>
+        </label>
+        <div className="modal-actions">
+          <button className="btn-ghost" onClick={onCancel}>Cancel</button>
+          <button className="btn-primary" onClick={confirm} autoFocus>Continue</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Confirm deletion of one or more accounts. */
 export function DeleteDialog({
   accounts,

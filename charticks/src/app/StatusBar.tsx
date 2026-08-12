@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Icon } from "@/components/Icon";
 import { Popover, usePopover } from "@/components/Popover";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { bridge } from "@/bridge/client";
 import { useUiStore, type Density } from "@/stores/useUiStore";
 import { useMarketStore } from "@/stores/useMarketStore";
 import { useBrokerStore } from "@/stores/useBrokerStore";
@@ -112,10 +114,22 @@ function BrokerIndicator() {
             <div className="pop-title">Connected Brokers ({connected.length})</div>
             {connected.map((a) => (
               <div className="pop-row" key={a.id}>
+                {/* Status view only — execution is toggled on the Brokers page,
+                    which stays the single source of truth for routing. */}
+                <span className="exec-star" title={a.execute ? "Live execution enabled" : undefined}>
+                  {a.execute ? "⭐" : ""}
+                </span>
                 <span className={`d ${healthClass(health[a.id]?.health)}`} />
                 {displayName(a)}
               </div>
             ))}
+            {connected.some((a) => a.execute) ? (
+              <div className="pop-note dim">⭐ = live execution enabled</div>
+            ) : (
+              <div className="pop-note dim">
+                No execution broker selected — live orders will be rejected.
+              </div>
+            )}
             <div className="pop-divider" />
             <button className="pop-action" onClick={goManage}>
               Manage Brokers →
@@ -190,6 +204,64 @@ function TradingModeIndicator() {
   );
 }
 
+/** Emergency halt on new entries. The state lives in the sidecar (which is what
+ *  actually enforces it) and arrives here via `risk_event`, so this button only
+ *  ever reflects and toggles server state — it never holds the truth itself.
+ *
+ *  Engaging asks for confirmation; releasing does too, because coming off a halt
+ *  is the more dangerous direction. Exits stay available while halted. */
+function KillSwitch({ halted }: { halted: boolean }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      await bridge.post("/kill-switch", {
+        halted: !halted,
+        reason: halted ? undefined : "Kill-switch engaged from the status bar",
+      });
+    } catch {
+      // The sidecar is the source of truth and did not change; the badge stays
+      // as it was rather than showing a halt that isn't in force.
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        className={`kill ${halted ? "armed" : ""}`}
+        title={halted
+          ? "Trading is halted — new entries are blocked. Click to release."
+          : "Halt all new entries. Closing positions stays available."}
+        aria-pressed={halted}
+        disabled={busy}
+        onClick={() => setConfirming(true)}
+      >
+        <span className="k" />
+        {halted ? "Halted" : "Kill-switch"}
+      </button>
+      {confirming && (
+        <ConfirmDialog
+          open
+          title={halted ? "Release the kill-switch?" : "Halt trading?"}
+          message={halted
+            ? "New entries will be allowed again immediately."
+            : "No new entries will be accepted until you release this. Closing "
+              + "or squaring off existing positions stays available."}
+          confirmLabel={halted ? "Release" : "Halt Trading"}
+          danger={!halted}
+          onConfirm={apply}
+          onCancel={() => setConfirming(false)}
+        />
+      )}
+    </>
+  );
+}
+
 export function StatusBar() {
   const clock = useClock();
   const { theme, toggleTheme, density, setDensity } = useUiStore();
@@ -222,10 +294,7 @@ export function StatusBar() {
         ))}
       </div>
 
-      <button className={`kill ${riskHalted ? "armed" : ""}`} title="Kill-switch">
-        <span className="k" />
-        {riskHalted ? "Halted" : "Kill-switch"}
-      </button>
+      <KillSwitch halted={riskHalted} />
 
       <div className="right-stack">
         <b className="num clock-txt">{clock}</b>

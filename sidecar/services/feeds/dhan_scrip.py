@@ -8,7 +8,7 @@ has to know the other's vocabulary — this module's only output is a set of
 the exchange segment each instrument must be subscribed on.
 
 Availability rules, per the agreed behaviour:
-  * refresh once a day into ``app/data_cache/``;
+  * refresh once a day into the sidecar data dir (services.paths.data_dir);
   * a failed download falls back to the newest cached file rather than leaving
     the feed with no instruments;
   * every outcome is logged, because a silently stale master shows up much

@@ -1,0 +1,49 @@
+===============================================================
+  CHARTICKS - EXECUTION TERMINAL  (version 0.1.0)
+===============================================================
+
+TO INSTALL
+  Double-click:  Charticks Setup 0.1.0.exe
+
+  Windows will warn that it does not recognise the app. That is
+  expected - the build is not code-signed yet.
+  Click "More info", then "Run anyway".
+
+  There is no wizard and no setup script. It installs and opens
+  by itself. You do NOT need Python or anything else.
+
+
+BEFORE YOU TRADE - READ THIS
+  Open KNOWN-LIMITATIONS.html.
+
+  In LIVE mode you CAN open a position and close it from the app
+  (fully, partially, or all at once with Square Off All).
+
+  But NOTHING EXITS AUTOMATICALLY. Stop Loss, Target and Trailing
+  Stop Loss do NOT work on live positions. A live position closes
+  only when you close it.
+
+  Keep your broker's own app or website open as a backup exit, in
+  case this app, your PC or your internet fails.
+
+  PAPER mode has no such limits - everything works there.
+
+
+THE OTHER FILES
+  INSTALL.html            full install guide
+  BROKER-SETUP.html       connecting your broker account
+  KNOWN-LIMITATIONS.html  what does not work yet  <-- read this
+  TROUBLESHOOTING.html    when something goes wrong
+  SHA256SUMS.txt          checksum to verify the installer
+
+  Double-click any .html file to open it in your browser.
+
+
+IF SOMETHING GOES WRONG
+  Send three things:
+    1. A screenshot of the whole window
+    2. What you did just before it happened
+    3. The newest folder from:  %APPDATA%\charticks\logs
+
+  Never share your broker credentials. Crop or blur them out of
+  any screenshot first.

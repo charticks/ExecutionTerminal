@@ -53,6 +53,23 @@ export interface PositionUpdate {
   tsl?: number;
 }
 
+/** Canonical live-order lifecycle, mirrored from
+ *  sidecar/services/order_sync/base.py. These are the broker's real states as
+ *  reported by the Order Synchronization Engine — not a guess made at
+ *  submission time. "COMPLETE" is retained only because the paper engine still
+ *  emits it. */
+export type OrderUpdateStatus =
+  | "NEW"
+  | "SUBMITTED"
+  | "ACCEPTED"
+  | "PENDING"
+  | "PARTIAL"
+  | "FILLED"
+  | "REJECTED"
+  | "CANCELLED"
+  | "EXPIRED"
+  | "COMPLETE";
+
 export interface OrderUpdate {
   type: "order_update";
   id: string;
@@ -60,7 +77,7 @@ export interface OrderUpdate {
   side: "BUY" | "SELL";
   qty: number;
   price: number;
-  status: "PENDING" | "COMPLETE" | "REJECTED" | "CANCELLED";
+  status: OrderUpdateStatus;
   ts: number;
 }
 

@@ -23,6 +23,7 @@ import time
 from typing import Any
 
 from services.instruments import InstrumentKey, instruments
+from services.paths import data_dir
 from services.reliability.retry_manager import RetryManager
 from services.reliability.transport import AsyncioTransport, Transport, TransportCallbacks
 from services.reliability.ws_manager import WebSocketManager
@@ -153,11 +154,7 @@ class DhanFeed(MarketFeed):
         self.should_run = False
         self.last_transport: DhanTransport | None = None
 
-        cache_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))))),
-            "app", "data_cache")
-        self.scrip = DhanScripMaster(cache_dir, self.host.log)
+        self.scrip = DhanScripMaster(data_dir(), self.host.log)
         self._scrip_day: str | None = None
 
         # Desired subscription set, canonical. Indices are permanent; options

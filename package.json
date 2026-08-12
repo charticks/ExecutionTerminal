@@ -9,6 +9,7 @@
     "typecheck": "npm --prefix charticks run typecheck",
     "sidecar": "npm --prefix charticks run dev:sidecar",
     "vite": "npm --prefix charticks run dev:vite",
-    "setup": "npm --prefix charticks install"
+    "setup": "npm --prefix charticks install",
+    "build:runtime": "node scripts/build-runtime.mjs"
   }
 }

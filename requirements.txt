@@ -1,4 +1,4 @@
-# Python sidecar + Trading Core dependencies.
+# Charticks Python sidecar dependencies.
 # Install:  pip install -r requirements.txt
 
 # Sidecar (FastAPI control plane + WebSocket data plane)
@@ -15,8 +15,13 @@ logzero
 # Broker SDKs
 smartapi-python        # Angel One  (imported as SmartApi)
 dhanhq                 # Dhan
-neo-api-client         # Kotak Neo
+# Kotak Neo is NOT on PyPI — `pip install neo-api-client` fails outright.
+# Kotak publishes to GitHub only, so it must be a direct VCS install (needs git):
+#   pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.1"
+# Its declared pins (websockets==8.1, asyncio==3.4.3, old certifi/idna/urllib3)
+# conflict with Dhan/uvicorn and must NOT be honoured — add --no-deps.
+# See scripts/runtime-requirements.txt for the vendored-build equivalent.
 breeze-connect         # ICICI Direct (imported as breeze_connect)
 
-# Legacy Tkinter UI — still imported via app/__init__.py -> bot_app
-tkcalendar
+# The retired Tkinter app under legacy/ needs tkcalendar on top of the above.
+# It is not installed here because nothing shipped imports it.

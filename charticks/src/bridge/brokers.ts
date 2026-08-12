@@ -94,6 +94,10 @@ export interface BrokerAccount {
   broker: string;
   nickname: string;
   autoConnect: boolean;
+  /** Opted in to receive LIVE orders. Independent of connectivity: a connected
+   *  account without this still streams market data and reports positions, but
+   *  never receives an order. Persisted with the account. */
+  execute: boolean;
 }
 
 /** Live connection state for an account, driven by sidecar broker_status. */

@@ -7,7 +7,7 @@ import type { BrokerAccount, Credentials } from "./brokers";
 interface BrokersApi {
   list(): Promise<BrokerAccount[]>;
   add(p: { broker: string; nickname: string; autoConnect: boolean; credentials: Credentials }): Promise<BrokerAccount>;
-  update(id: string, patch: { nickname?: string; autoConnect?: boolean; credentials?: Credentials }): Promise<{ ok: boolean; error?: string }>;
+  update(id: string, patch: { nickname?: string; autoConnect?: boolean; execute?: boolean; credentials?: Credentials }): Promise<{ ok: boolean; error?: string }>;
   rename(id: string, nickname: string): Promise<{ ok: boolean; error?: string }>;
   remove(id: string): Promise<{ ok: boolean }>;
   getSecrets(id: string): Promise<Credentials | null>;
@@ -44,7 +44,8 @@ function lsRead(): LsRecord[] {
 function lsWrite(rows: LsRecord[]) {
   localStorage.setItem(LS_KEY, JSON.stringify(rows));
 }
-const meta = ({ id, broker, nickname, autoConnect }: LsRecord): BrokerAccount => ({ id, broker, nickname, autoConnect });
+const meta = ({ id, broker, nickname, autoConnect, execute }: LsRecord): BrokerAccount =>
+  ({ id, broker, nickname, autoConnect, execute: !!execute });
 
 const lsApi: BrokersApi = {
   async list() {
@@ -52,7 +53,8 @@ const lsApi: BrokersApi = {
   },
   async add(p) {
     const rows = lsRead();
-    const rec: LsRecord = { id: crypto.randomUUID(), broker: p.broker, nickname: p.nickname, autoConnect: p.autoConnect, credentials: p.credentials };
+    // New accounts never execute until explicitly opted in on the Brokers page.
+    const rec: LsRecord = { id: crypto.randomUUID(), broker: p.broker, nickname: p.nickname, autoConnect: p.autoConnect, execute: false, credentials: p.credentials };
     rows.push(rec);
     lsWrite(rows);
     return meta(rec);
@@ -63,6 +65,7 @@ const lsApi: BrokersApi = {
     if (!r) return { ok: false, error: "not found" };
     if (patch.nickname !== undefined) r.nickname = patch.nickname;
     if (patch.autoConnect !== undefined) r.autoConnect = patch.autoConnect;
+    if (patch.execute !== undefined) r.execute = patch.execute;
     if (patch.credentials) r.credentials = patch.credentials;
     lsWrite(rows);
     return { ok: true };

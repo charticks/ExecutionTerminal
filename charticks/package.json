@@ -10,8 +10,9 @@
     "dev": "concurrently -k -n VITE,SIDECAR -c cyan,green \"npm:dev:vite\" \"npm:dev:sidecar\"",
     "dev:vite": "vite",
     "dev:sidecar": "cd ../sidecar && python -m uvicorn server:app --host 127.0.0.1 --port 8787 --reload",
-    "build": "tsc -b && vite build && electron-builder",
-    "typecheck": "tsc -b --noEmit"
+    "build": "npm run build:runtime && tsc -b && vite build && electron-builder",
+    "typecheck": "tsc -b --noEmit",
+    "build:runtime": "node ../scripts/build-runtime.mjs"
   },
   "dependencies": {
     "keytar": "^7.9.0",
@@ -37,9 +38,14 @@
     "files": ["dist/**/*", "dist-electron/**/*"],
     "extraResources": [
       {
+        "from": "runtime/python",
+        "to": "python",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      {
         "from": "../sidecar",
         "to": "sidecar",
-        "filter": ["**/*", "!__pycache__/**", "!**/__pycache__/**", "!*.pyc", "!**/*.pyc", "!logs/**", "!**/*.log"]
+        "filter": ["**/*", "!__pycache__/**", "!**/__pycache__/**", "!*.pyc", "!**/*.pyc", "!logs/**", "!**/*.log", "!data_cache/**"]
       }
     ],
     "win": { "target": "nsis" }

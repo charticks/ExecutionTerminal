@@ -29,6 +29,7 @@ import threading
 import time
 from typing import Any
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 from services import expiry as expiry_filter
@@ -634,6 +635,69 @@ class PaperEngine:
             e = self._orders.get(entity_id) or self._positions.get(entity_id)
             return e["underlying"] if e else None
 
+    # ── read model for risk validation ───────────────────────────────────
+    # Same four methods as services.live_book.LiveBook, so risk validation asks
+    # whichever book is authoritative for the mode the same questions.
+    def open_count(self) -> int:
+        with self._lock:
+            return sum(1 for p in self._positions.values() if p["status"] == "OPEN")
+
+    def held_lots(self, underlying: str, expiry: str, strike: float,
+                  opt_type: str) -> int:
+        """Lots currently open on one contract — what Max Position caps."""
+        with self._lock:
+            return sum(
+                p.get("lots", 0) for p in self._positions.values()
+                if p["status"] == "OPEN"
+                and p["underlying"] == underlying
+                and float(p.get("strike", 0)) == float(strike)
+                and p.get("optType") == opt_type
+                and (not p.get("expiry") or not expiry or p["expiry"] == expiry)
+            )
+
+    def _check_added_lots(self, pos: dict, delta: int) -> dict | None:
+        """Apply the Max Position rule to lots added through the stepper, so
+        growing a position outside the order ticket cannot exceed a limit the
+        ticket enforces. Caller must hold the lock."""
+        from services.risk_engine import risk_engine
+
+        limit = risk_engine.config.max_positions
+        if limit <= 0:
+            return None
+        resulting = pos["lots"] + delta
+        if resulting <= limit:
+            return None
+        symbol = (f"{pos['underlying']} {pos.get('expiry', '')} "
+                  f"{int(pos.get('strike', 0))} {pos.get('optType', '')}").strip()
+        diagnostics.event(
+            "risk", "Adjust lots", "rejected", symbol=symbol, limit=limit,
+            held=pos["lots"], adding=delta, code="MAX_POSITION_LOTS")
+        return {"ok": False, "code": "MAX_POSITION_LOTS",
+                "error": f"Adding {delta} lot(s) would take {symbol} to "
+                         f"{resulting} lots, over your Max Position limit ({limit}).",
+                "limit": limit, "held": pos["lots"], "requested": delta}
+
+    def working_order_id(self, underlying: str, expiry: str, strike: float,
+                         opt_type: str, side: str) -> str | None:
+        """Id of an existing working order on this contract + side, for the
+        shared duplicate rule. Mirrors LiveBook.working_order_id."""
+        token = manager.resolve_option(underlying, expiry, strike, opt_type)[1]
+        if not token:
+            return None
+        with self._lock:
+            existing = self._working_order(token, side)
+            return existing["id"] if existing else None
+
+    def orders_today(self) -> int:
+        """Entries this session. Counts orders placed, not positions — the same
+        thing the Home bar's Max Trades counter means."""
+        with self._lock:
+            return len(self._orders)
+
+    def session_pnl(self) -> float:
+        with self._lock:
+            return self._net_open_pnl()
+
     def open_underlyings(self) -> list[str]:
         """Distinct underlyings with an open position — lets square-off-all be
         gated on any of their sessions rather than the equity window alone."""
@@ -660,6 +724,17 @@ class PaperEngine:
 
     # ── position ops driven from the UI (mirror usePositionsStore) ───────
     def close_position(self, pos_id: str, fraction: float = 1.0) -> dict:
+        # `fraction` arrives straight off the request body. It was never range
+        # checked, and a negative value inverted the arithmetic below
+        # (`lots -= exit_lots` with a negative exit_lots ADDS): a "close" call
+        # with fraction=-1 doubled the position instead of closing it.
+        try:
+            fraction = float(fraction)
+        except (TypeError, ValueError):
+            fraction = float("nan")
+        if not (fraction == fraction) or fraction <= 0 or fraction > 1:
+            return {"ok": False, "code": "INVALID_EXIT_FRACTION",
+                    "error": "Exit fraction must be greater than 0 and at most 1."}
         with self._lock:
             p = self._positions.get(pos_id)
             if not p or p["status"] != "OPEN":
@@ -676,10 +751,25 @@ class PaperEngine:
         return {"ok": True}
 
     def adjust_lots(self, pos_id: str, delta: int) -> dict:
+        # Adding lots here grows a position without going near place_order, so
+        # it used to bypass every limit in the risk engine — `delta` was
+        # unbounded and +9999 was accepted. Increases are now validated against
+        # the same Max Position rule an equivalent order would face.
+        try:
+            delta = int(delta)
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "INVALID_ADJUSTMENT",
+                    "error": "Lot adjustment must be a whole number."}
+        if delta == 0:
+            return {"ok": True}
         with self._lock:
             p = self._positions.get(pos_id)
             if not p or p["status"] != "OPEN":
                 return {"ok": False, "error": "Position not open."}
+            if delta > 0:
+                violation = self._check_added_lots(p, delta)
+                if violation is not None:
+                    return violation
             lot_sz = self._lot_size(p)
             if delta > 0:
                 # Add lots — averages the cost basis at the current LTP.
@@ -719,13 +809,31 @@ class PaperEngine:
         return {"ok": True}
 
     def roll(self, pos_id: str, new_strike: int, new_entry: float) -> dict:
+        # A roll closes one leg and opens another at a price the caller supplies,
+        # so an unvalidated entry price would silently define the new position's
+        # cost basis (and, through _compute_risk, its SL and target).
+        try:
+            new_strike = int(new_strike)
+            entry = round(float(new_entry), 2)
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "INVALID_ROLL",
+                    "error": "Roll needs a whole strike and a numeric entry price."}
+        if new_strike <= 0 or not (entry == entry) or entry < MIN_PRICE:
+            return {"ok": False, "code": "INVALID_ROLL",
+                    "error": f"Roll entry price must be at least ₹{MIN_PRICE:.2f} "
+                             f"and the strike must be positive."}
         with self._lock:
             src = self._positions.get(pos_id)
             if not src or src["status"] != "OPEN":
                 return {"ok": False, "error": "Position not open."}
             _sym, token, _exch = manager.resolve_option(
                 src["underlying"], src["expiry"], new_strike, src["optType"])
-            entry = round(float(new_entry), 2)
+            if not token:
+                # Never roll into a contract we cannot resolve — the leg would
+                # open with no token and never mark to market.
+                return {"ok": False, "code": "INVALID_ROLL",
+                        "error": f"Could not resolve {src['underlying']} "
+                                 f"{src['expiry']} {new_strike} {src['optType']}."}
             # Close the source leg.
             src["status"] = "CLOSED"
             src["exit"] = src["ltp"]

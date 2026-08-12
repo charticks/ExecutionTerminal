@@ -297,6 +297,10 @@ export function OptionChainPanel() {
     overrideLots?: number,
     /** Skip the Max Position check (the user chose "Override Once"). */
     skipMaxPos = false,
+    /** The user knowingly chose to exceed Max Position. Travels with the order
+     *  so the sidecar — which enforces the limit independently — allows and
+     *  logs this one rather than rejecting it. */
+    overrideMaxPos = false,
   ) => {
     if (!lotsValid) return;
     // Duplicate-order prevention (Issue #6): ignore a re-entrant submit while
@@ -340,6 +344,7 @@ export function OptionChainPanel() {
     // Max Position limit on the RESULTING quantity of this position, resolved
     // through the profile's configured overflow behaviour.
     let sendLots = overrideLots ?? lots;
+    let forceMaxPos = overrideMaxPos;
     if (!skipMaxPos) {
       const limit = useSessionLimits.getState().effectiveMaxPos();
       if (limit > 0 && held + sendLots > limit) {
@@ -362,7 +367,9 @@ export function OptionChainPanel() {
           sendLots = remaining;
         }
         // "override" falls through with the full requested quantity — this
-        // transaction only; the configured limit is never modified.
+        // transaction only; the configured limit is never modified. The sidecar
+        // enforces the same limit, so the breach must be declared to it.
+        if (behavior === "override") forceMaxPos = true;
       }
     }
 
@@ -395,6 +402,7 @@ export function OptionChainPanel() {
         expiry,
         product: oc.product,
         validity: oc.validity,
+        overrideMaxPos: forceMaxPos,
       };
       const res = await placeOrder(input);
       if (!res.ok) {
@@ -742,7 +750,8 @@ export function OptionChainPanel() {
         onOverride={() => {
           const p = maxPosPrompt;
           setMaxPosPrompt(null);
-          if (p) void submitOrder(p.strike, p.optType, p.side, p.price, p.requested, true);
+          // Last argument: tell the sidecar this breach was chosen, not a bug.
+          if (p) void submitOrder(p.strike, p.optType, p.side, p.price, p.requested, true, true);
         }}
         onCancel={() => setMaxPosPrompt(null)}
       />

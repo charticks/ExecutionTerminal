@@ -15,6 +15,8 @@ interface AccountMeta {
   broker: BrokerId;
   nickname: string;
   autoConnect: boolean;
+  /** Live orders may be routed to this account (see StoredAccount.execute). */
+  execute: boolean;
 }
 type Credentials = Record<string, string>;
 
@@ -31,7 +33,7 @@ contextBridge.exposeInMainWorld("charticks", {
     list: (): Promise<AccountMeta[]> => ipcRenderer.invoke("brokers:list"),
     add: (payload: { broker: BrokerId; nickname: string; autoConnect: boolean; credentials: Credentials }): Promise<AccountMeta> =>
       ipcRenderer.invoke("brokers:add", payload),
-    update: (id: string, patch: { nickname?: string; autoConnect?: boolean; credentials?: Credentials }): Promise<{ ok: boolean; error?: string; account?: AccountMeta }> =>
+    update: (id: string, patch: { nickname?: string; autoConnect?: boolean; execute?: boolean; credentials?: Credentials }): Promise<{ ok: boolean; error?: string; account?: AccountMeta }> =>
       ipcRenderer.invoke("brokers:update", id, patch),
     rename: (id: string, nickname: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke("brokers:rename", id, nickname),

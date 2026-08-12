@@ -10,9 +10,9 @@ reads none of it directly — it asks ``services.instruments``.
 Unlike Dhan's single CSV, ICICI publishes a ZIP of per-exchange CSVs at
 https://directlink.icicidirect.com/NewSecurityMaster/SecurityMaster.zip
 (regenerated daily at 08:00). The extracted CSVs are cached daily under
-``app/data_cache`` with fallback to the newest cached day when the download
-fails, and every outcome is logged — a silently stale master surfaces much
-later as an option chain quoting yesterday's strikes.
+the sidecar data dir (services.paths.data_dir), with fallback to the newest
+cached day when the download fails, and every outcome is logged — a silently
+stale master surfaces much later as an option chain quoting yesterday's strikes.
 
 Column names are resolved by alias with the resolution logged (ICICI's headers
 have carried surrounding quotes and stray spaces), so a schema drift shows up

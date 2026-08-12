@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charticks 0.1.0 — Known Limitations</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1c2430; --muted:#5b6673; --line:#dfe4ea;
+    --accent:#1f3864; --warn-bg:#fff4d6; --warn-line:#e0a800;
+    --danger-bg:#fdecea; --danger-line:#c0392b; --ok-bg:#e9f6ec; --ok-line:#2e7d43;
+    --code-bg:#f2f4f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:2.5rem 1.25rem 4rem;
+    font:16px/1.65 "Segoe UI",system-ui,-apple-system,Arial,sans-serif;
+    color:var(--fg);background:var(--bg)}
+  .wrap{max-width:820px;margin:0 auto}
+  h1{font-size:1.9rem;margin:0 0 .2rem;color:var(--accent)}
+  .sub{color:var(--muted);margin:0 0 2rem}
+  h2{font-size:1.25rem;margin:2.4rem 0 .7rem;color:var(--accent);
+     border-bottom:2px solid var(--line);padding-bottom:.35rem}
+  h3{font-size:1.05rem;margin:1.6rem 0 .4rem}
+  code{background:var(--code-bg);padding:.12em .4em;border-radius:3px;
+     font:.92em ui-monospace,Consolas,monospace}
+  .box{border-left:5px solid var(--line);background:#f7f9fb;padding:.9rem 1.1rem;
+     border-radius:0 6px 6px 0;margin:1.2rem 0}
+  .warn{border-left-color:var(--warn-line);background:var(--warn-bg)}
+  .danger{border-left-color:var(--danger-line);background:var(--danger-bg)}
+  .ok{border-left-color:var(--ok-line);background:var(--ok-bg)}
+  .box p{margin:.4rem 0}.box p:first-child{margin-top:0}.box p:last-child{margin-bottom:0}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.95rem}
+  th,td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}
+  th{background:#eef1f5}
+  .no{color:#c0392b;font-weight:700}
+  .yes{color:#2e7d43;font-weight:700}
+  .banner{background:var(--danger-bg);border:2px solid var(--danger-line);
+     border-radius:8px;padding:1.1rem 1.3rem;margin:0 0 2rem}
+  .banner h2{margin:0 0 .5rem;border:0;padding:0;color:var(--danger-line);font-size:1.2rem}
+  .banner p{margin:.45rem 0}
+  footer{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);
+     color:var(--muted);font-size:.88rem}
+  a{color:var(--accent)}
+  @media print{body{padding:0}.box,.banner{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Known Limitations</h1>
+<p class="sub">Charticks 0.1.0 · What does not work yet, and what that means for you</p>
+
+<div class="banner">
+  <h2>⚠ Live positions have no automatic protection</h2>
+  <p>In <strong>Live</strong> mode this build sends real orders to your broker. You
+  <strong>can</strong> open a position and close it (fully, partially, or all at once).</p>
+  <p>But <strong>Stop Loss, Target and Trailing Stop Loss do NOT work on live
+  positions.</strong> Nothing exits automatically. A live position is only closed when
+  <em>you</em> close it.</p>
+  <p><strong>Keep your broker's own app or website open as a backup exit</strong> — if this
+  app, your PC or your internet fails, that is your only way out.</p>
+  <p>Paper mode has none of these limits.</p>
+</div>
+
+<h2>Paper vs Live — what actually works</h2>
+
+<table>
+  <tr><th>Action</th><th>Paper</th><th>Live</th></tr>
+  <tr><td>Place a market order</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Place a limit order</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>See the position and live P&amp;L</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Close a position</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Partial exit (25 / 50 %)</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Square off all</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td><strong>Modify a resting order</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
+  <tr><td><strong>Cancel a resting order</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
+  <tr><td><strong>Stop Loss / Target</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
+  <tr><td><strong>Trailing Stop Loss</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
+  <tr><td><strong>Adjust lots on a position</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
+  <tr><td><strong>Roll a position</strong></td><td class="yes">Yes</td><td class="no">No — see below</td></tr>
+  <tr><td>Max position / session limits</td><td class="yes">Yes</td><td class="no">Not enforced</td></tr>
+</table>
+
+<h2>The specific risks</h2>
+
+<h3>1. Nothing exits a live position automatically</h3>
+<div class="box danger">
+  <p>You can type a Stop Loss or Target against a live position, but <strong>nothing
+  enforces it</strong>. The risk engine only watches paper positions. A live position has
+  <strong>no automatic protection at all</strong> — it will not exit on a stop, a target,
+  a trailing stop, or a portfolio trail.</p>
+  <p>Set your stops in your broker's terminal, or watch the position yourself.</p>
+</div>
+
+<h3>2. Roll shows something that did not happen</h3>
+<div class="box danger">
+  <p>If you use <strong>Roll</strong> on a <em>live</em> position, the app will display a
+  rolled position <strong>that does not exist at your broker</strong>. Nothing is sent. The
+  original position is untouched and reappears within a few seconds when the app next reads
+  your broker's book.</p>
+  <p><strong>Do not use Roll in Live mode.</strong> It works correctly in Paper.</p>
+</div>
+
+<h3>3. A resting live order cannot be changed or cancelled</h3>
+<p>A live LIMIT order that has not filled yet sits at your broker, and the app offers no way
+to re-price or cancel it. <strong>Use your broker's terminal for that.</strong> Working live
+orders are also not shown in the Positions grid — a position appears only once the order
+actually fills.</p>
+
+<h3>4. Position and trade limits do not apply in Live</h3>
+<p>Max Position, max trades and max loss are checked against the paper book, so they do not
+restrain live orders. Size your live trades manually.</p>
+
+<h3>5. A live position takes a few seconds to appear</h3>
+<p>Live positions are read from your broker roughly every 4 seconds, so a filled order shows
+up shortly after — not instantly like Paper. The green “Order accepted” confirmation appears
+immediately with the broker's order id; the position row follows.</p>
+
+<h2>Broker support</h2>
+
+<table>
+  <tr><th>Broker</th><th>Market data</th><th>Live entry</th><th>Live close</th></tr>
+  <tr><td>Angel One</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>ICICI Direct (Breeze)</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="no">Not yet</td></tr>
+  <tr><td>Kotak Neo</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
+  <tr><td>Dhan</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
+</table>
+
+<p><strong>Closing from the app is Angel-only in this build.</strong> An ICICI live position
+must be closed in ICICI's own terminal.</p>
+
+<p>Kotak and Dhan will connect and stream prices, but a live order returns
+<em>“Live order routing for &lt;broker&gt; is not available yet.”</em> Nothing is sent.</p>
+
+<h2>Other things to know</h2>
+
+<h3>Angel requires your IP to be whitelisted</h3>
+<p>Every order fails with <code>AG7002 — “&lt;your ip&gt; is not a registered IP”</code> unless
+your machine's public IP is registered on your own SmartAPI app. On mobile tethering or a
+CGNAT connection your IP changes without warning, which breaks order placement mid-session.
+See <a href="BROKER-SETUP.html">BROKER-SETUP.html</a>.</p>
+
+<h3>There is no exchange holiday calendar</h3>
+<p>On a trading holiday the app still believes the market is open between 09:15 and 15:30 IST
+and will let you submit an order. Your broker rejects it. The app is not wrong about the
+clock, it simply does not know the holiday list.</p>
+
+<h3>Nothing is saved when the app restarts</h3>
+<p>Paper positions, order history and any Stop Loss / Target you configured are held in
+memory only. Closing the app or restarting the engine clears them. Real broker positions are
+unaffected — they live at the broker and reappear when the app reconnects.</p>
+
+<h3>Closing an ICICI session key expires daily</h3>
+<p>ICICI issues a session key by browser login that dies each day. Reconnect that account
+every morning before trading.</p>
+
+<h3>The app is not code-signed</h3>
+<p>Windows will warn on install. See <a href="INSTALL.html">INSTALL.html</a>.</p>
+
+<div class="box ok">
+  <p><strong>Use Paper mode for anything you are still evaluating.</strong> It runs on the
+  same live market feed and the same execution rules as live trading — market orders fill at
+  the ask, sells at the bid, limit orders rest until the market reaches them. The only
+  difference is that no order leaves your machine.</p>
+</div>
+
+<footer>
+  Charticks 0.1.0 · These limitations are known and being worked on. Report anything not
+  listed here — especially any case where the app and your broker disagree about a position.
+</footer>
+
+</div>
+</body>
+</html>

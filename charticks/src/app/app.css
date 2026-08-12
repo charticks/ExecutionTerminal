@@ -85,6 +85,9 @@
   border-radius: 11px; box-shadow: var(--shadow); padding: 8px; font-size: 12px;
 }
 .conn-pop { left: 0; right: auto; }
+/* Floating mode: portaled to <body> and positioned by Popover.tsx, so the
+ * anchored offsets above must all yield to the inline top/left. */
+.popover-floating { position: fixed; right: auto; bottom: auto; margin: 0; }
 .pop-title {
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--text-faint); padding: 4px 8px 8px;
@@ -96,6 +99,8 @@
 .pop-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; }
 .pop-row:hover { background: var(--panel-2); }
 .pop-row .d { width: 7px; height: 7px; border-radius: 50%; }
+/* Fixed-width so broker names stay aligned whether or not the star is shown. */
+.exec-star { width: 14px; flex: none; font-size: 11px; line-height: 1; }
 .pop-empty { padding: 8px; color: var(--text-faint); }
 .pop-divider { height: 1px; background: var(--border); margin: 6px 4px; }
 .pop-action {
@@ -112,19 +117,44 @@
 
 /* ---- Brokers page (compact list) ---- */
 .broker-list { display: flex; flex-direction: column; padding: 8px; gap: 2px; }
+/* Three columns so Execute reads as a property of the broker sitting right
+ * beside its name, yet still lines up across every row. The name column is a
+ * clamped width rather than content-sized: content-sizing would move Execute
+ * horizontally with each broker's name length, which is exactly the ragged
+ * look this layout avoids. Long names ellipsis instead of shoving it. */
 .broker-row {
-  display: flex; align-items: center; gap: 10px; padding: 9px 10px;
-  border-radius: 8px; cursor: pointer; font-size: 13px; user-select: none;
+  display: grid;
+  grid-template-columns: clamp(150px, 38%, 260px) auto 1fr;
+  align-items: center; gap: 12px; padding: 9px 10px;
+  border-radius: 8px; font-size: 13px; user-select: none;
 }
 .broker-row:hover { background: var(--panel-2); }
 .broker-row.sel { background: var(--accent-soft); }
 .broker-row input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
 .broker-row .d { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-.broker-row-name { color: var(--text); }
+.broker-row-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Column 1: checkbox + status dot + name. min-width:0 lets the name ellipsis
+ * instead of forcing the track wider. */
+.broker-row-select {
+  display: flex; align-items: center; gap: 10px; min-width: 0; cursor: pointer;
+}
+/* Column 3: connection error text, right-aligned so it never crowds Execute. */
 .broker-row-detail {
-  margin-left: auto; font-size: 11px; color: var(--down); max-width: 45%;
+  justify-self: end; font-size: 11px; color: var(--down); min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* Column 2: Execute opt-in. Understated until on, when it takes the accent
+ * used elsewhere for "this is armed". */
+.broker-row-exec {
+  display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; color: var(--text-dim);
+  padding: 3px 9px 3px 7px; border-radius: 20px; border: 1px solid var(--border);
+}
+.broker-row-exec input[type="checkbox"] { width: 14px; height: 14px; }
+.broker-row-exec:hover { border-color: var(--border-strong); color: var(--text); }
+.broker-row-exec.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.broker-row-exec.off { opacity: 0.4; cursor: default; }
+.broker-row-exec.off:hover { border-color: var(--border); color: var(--text-dim); }
 .broker-toolbar {
   display: flex; align-items: center; gap: 9px; padding: 12px 14px;
   border-top: 1px solid var(--border);
@@ -132,7 +162,8 @@
 .broker-toolbar .grow { flex: 1; }
 .broker-toolbar button:disabled { opacity: 0.45; cursor: default; }
 .add-broker { font-weight: 600; }
-.manage-pop { min-width: 200px; top: auto; bottom: calc(100% + 8px); left: 0; right: auto; }
+/* Position is computed in JS (floating mode) — only sizing belongs here. */
+.manage-pop { min-width: 200px; }
 .pop-action:disabled { color: var(--text-faint); cursor: default; }
 .pop-action:disabled:hover { background: transparent; }
 .pop-action.danger { color: var(--down); }

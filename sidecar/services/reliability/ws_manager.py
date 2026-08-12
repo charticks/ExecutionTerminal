@@ -9,10 +9,9 @@ while the transport holds one SDK's mechanics. Previously the two were fused:
 this class assigned SmartWebSocketV2's four callback attributes directly, which
 any non-Angel feed would have had to imitate.
 
-Also tracks heartbeat/tick staleness (`stale` property) the way
-engines.option_chain_engine.OptionChainEngine.canary_alive already does for
-the option-chain feed, so ConnectionHealthMonitor has one shape to poll for
-both feeds.
+Also tracks heartbeat/tick staleness (`stale` property) the way the retired
+Tkinter bot's OptionChainEngine.canary_alive did (legacy/engines/), so
+ConnectionHealthMonitor has one shape to poll for both feeds.
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ import threading
 import time
 from typing import Any, Callable
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 
@@ -75,7 +75,8 @@ class WebSocketManager:
         self._lock = threading.Lock()
 
     def _log(self, level: str, msg: str) -> None:
-        hub.publish(events.log_line(level, f"[ws:{self.name}] {msg}"))
+        diagnostics.emit("websocket", level, f"[ws:{self.name}] {msg}",
+                         publish=True, feed=self.name)
 
     @property
     def stale(self) -> bool:
@@ -238,5 +239,9 @@ class WebSocketManager:
     def _safe_close(transport: Transport) -> None:
         try:
             transport.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Deliberately non-fatal: we are replacing this transport anyway.
+            # Recorded because a close that always fails means the old socket
+            # is still up, and duplicate feeds are very hard to spot later.
+            diagnostics.emit("websocket", "warn", "transport close failed",
+                             error=str(exc))

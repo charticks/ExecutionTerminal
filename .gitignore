@@ -1,7 +1,11 @@
 # ── Secrets ──────────────────────────────────────────────────────────────────
-# config.py holds live broker API keys, PINs and TOTP secrets; accounts.json
-# holds per-account credentials. Both are required to RUN but must never be
-# committed. Copy config.example.py -> config.py on a new machine.
+# Broker credentials live ONLY in the Electron credential store, encrypted via
+# the OS keystore (see charticks/electron/main.ts). Nothing in this repo should
+# ever hold a key, PIN or TOTP secret.
+#
+# These two are the retired Tkinter app's plaintext credential files. They are
+# no longer produced or read by anything, and are listed purely so a leftover
+# copy on an old working tree can never be committed by accident.
 config.py
 accounts.json
 
@@ -14,11 +18,18 @@ venv/
 charticks/dist/
 charticks/dist-electron/
 charticks/release/
+# Vendored Python interpreter + packages (~150 MB), rebuilt by
+# `npm run build:runtime`. Reproducible from scripts/runtime-requirements.txt.
+charticks/runtime/
 *.tsbuildinfo
+
+# distribution/ is the assembled tester bundle: the hand-written guides in it
+# ARE source and are committed, but the installer electron-builder produces is
+# a ~165 MB build artifact and must not be.
+distribution/*.exe
 
 # ── Generated at runtime ─────────────────────────────────────────────────────
 # Instrument masters / scrip masters re-downloaded per trading day (~100 MB).
-app/data_cache/
 data_cache/
 logs/
 

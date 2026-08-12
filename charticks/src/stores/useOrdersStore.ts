@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { lotSize } from "@/stores/usePositionsStore";
 import { type RiskRule } from "@/lib/risk";
-import { useTradingModeStore } from "@/stores/useTradingModeStore";
+import { useTradingModeStore, resyncTradingMode } from "@/stores/useTradingModeStore";
 import { bridge } from "@/bridge/client";
 
 // Order/trade ledger. In PAPER mode the sidecar paper engine
@@ -39,6 +39,9 @@ export interface Order {
   status: OrderStatus;
   avgFill?: number | null;
   rule?: RiskRule; // risk defaults captured at submit, applied on execution
+  /** The broker's own order id, once placement returns one. Live rows are
+   *  matched on this by the Order Synchronization Engine's updates. */
+  brokerOrderId?: string;
 }
 
 export interface Trade {
@@ -72,13 +75,18 @@ export interface OrderInput {
   /** Bypass the one-working-order-per-instrument-and-side rule. Set only by the
    *  "retry remaining quantity" flow after a partially executed split order. */
   allowDuplicate?: boolean;
+  /** The user knowingly exceeded Max Position. The sidecar enforces that limit
+   *  independently, so the choice must be declared rather than assumed. */
+  overrideMaxPos?: boolean;
 }
 
 export interface PlaceResult {
   ok: boolean;
   error?: string;
   /** Machine-readable rejection reason from the sidecar — "MARKET_CLOSED",
-   *  "DUPLICATE_PENDING" or "PARTIAL_FILL". Mirrors the sidecar contract. */
+   *  "DUPLICATE_PENDING", "PARTIAL_FILL", "NO_EXECUTION_BROKER",
+   *  "EXECUTION_BROKER_DISCONNECTED", "MODE_REQUIRED" or "MODE_MISMATCH".
+   *  Mirrors the sidecar contract. */
   code?: string;
   /** Present when code === "PARTIAL_FILL": a split order stopped part-way. */
   executedQty?: number;
@@ -113,6 +121,12 @@ interface OrdersState {
   modifyOrder: (id: string, patch: { price?: number; qty?: number; lots?: number }) => void;
   cancelOrder: (id: string) => void;
   updateStatus: (id: string, status: OrderStatus) => void;
+  /** Apply broker-confirmed state to a live order (see liveOrderSync). This is
+   *  the only path that may mark a live order EXECUTED. */
+  applyBrokerUpdate: (
+    id: string,
+    patch: { brokerOrderId?: string; status: OrderStatus; filledQty?: number; avgFill?: number },
+  ) => void;
 }
 
 export const useOrdersStore = create<OrdersState>((set, get) => ({
@@ -136,7 +150,13 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
     ),
 
   placeOrder: async (input) => {
+    // Read the mode ONCE and send it with the order. The sidecar routes on this
+    // value (after checking it against its own), so the engine that fills the
+    // order is the one the badge showed when the user clicked — not whatever
+    // the sidecar happens to think later.
+    const mode = useTradingModeStore.getState().mode;
     const body = {
+      mode,
       underlying: input.underlying,
       allowDuplicate: input.allowDuplicate ?? false,
       expiry: input.expiry ?? "",
@@ -150,10 +170,11 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
       rule: input.rule,
       product: input.product ?? "NRML",
       validity: input.validity ?? "DAY",
+      overrideMaxPos: input.overrideMaxPos ?? false,
     };
 
     // LIVE: record a PENDING order for visibility, then reconcile on response.
-    if (useTradingModeStore.getState().mode === "live") {
+    if (mode === "live") {
       const oid = `O${get().nextId}`;
       const order: Order = {
         id: oid, ts: Date.now(), underlying: input.underlying, expiry: input.expiry,
@@ -165,10 +186,17 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
       set((s) => ({ nextId: s.nextId + 1, orders: [order, ...s.orders] }));
       try {
         const res = await bridge.post<PlaceResult>("/orders/place", body);
-        get().updateStatus(oid, res.ok ? "EXECUTED" : "REJECTED");
+        if (res.code === "MODE_MISMATCH") resyncTradingMode();
+        // A successful response means SUBMITTED, not filled — the broker
+        // returned an order id and nothing more. The row stays PENDING until
+        // the Order Synchronization Engine reports the broker's real state
+        // (see liveOrderSync). Only an outright rejection is final here.
+        if (!res.ok) get().updateStatus(oid, "REJECTED");
         return res;
       } catch (e) {
-        get().updateStatus(oid, "REJECTED");
+        // The request itself failed, so we do not know whether the broker got
+        // it. Left PENDING deliberately: marking it REJECTED would claim the
+        // order does not exist, and sync will resolve it if it does.
         return { ok: false, error: String(e) };
       }
     }
@@ -176,22 +204,44 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
     // PAPER: the engine validates, fills (market) or rests (limit), and pushes
     // the resulting book via `paper_state`. No client-side order/position here.
     try {
-      return await bridge.post<PlaceResult>("/orders/place", body);
+      const res = await bridge.post<PlaceResult>("/orders/place", body);
+      if (res.code === "MODE_MISMATCH") resyncTradingMode();
+      return res;
     } catch (e) {
       return { ok: false, error: String(e) };
     }
   },
 
   modifyOrder: (id, patch) => {
-    bridge.post("/orders/modify", { id, ...patch }).catch(() => {});
+    const mode = useTradingModeStore.getState().mode;
+    bridge.post("/orders/modify", { mode, id, ...patch }).catch(() => {});
   },
 
   cancelOrder: (id) => {
-    bridge.post("/orders/cancel", { id }).catch(() => {});
+    const mode = useTradingModeStore.getState().mode;
+    bridge.post("/orders/cancel", { mode, id }).catch(() => {});
   },
 
   updateStatus: (id, status) =>
     set((s) => ({ orders: s.orders.map((o) => (o.id === id ? { ...o, status } : o)) })),
+
+  applyBrokerUpdate: (id, patch) =>
+    set((s) => ({
+      orders: s.orders.map((o) => {
+        if (o.id !== id) return o;
+        const lotSz = Math.max(1, Math.round(o.qty / Math.max(1, o.lots)));
+        return {
+          ...o,
+          brokerOrderId: patch.brokerOrderId ?? o.brokerOrderId,
+          status: patch.status,
+          // filledQty arrives in units; the ledger tracks lots.
+          filledLots: patch.filledQty != null
+            ? Math.min(o.lots, Math.round(patch.filledQty / lotSz))
+            : o.filledLots,
+          avgFill: patch.avgFill ?? o.avgFill,
+        };
+      }),
+    })),
 }));
 
 // Re-export so callers that used lotSize via this module keep working.

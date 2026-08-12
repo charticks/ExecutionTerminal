@@ -27,9 +27,13 @@ interface BrokerState {
 
   loadAccounts: () => Promise<void>;
   addAccount: (p: { broker: string; nickname: string; autoConnect: boolean; credentials: Credentials }) => Promise<void>;
-  updateAccount: (id: string, patch: { nickname?: string; autoConnect?: boolean; credentials?: Credentials }) => Promise<void>;
+  updateAccount: (id: string, patch: { nickname?: string; autoConnect?: boolean; execute?: boolean; credentials?: Credentials }) => Promise<void>;
   renameAccount: (id: string, nickname: string) => Promise<void>;
   deleteAccount: (id: string) => Promise<void>;
+
+  /** Opt an account in/out of live order execution. Persisted with the broker
+   *  config and pushed to the sidecar, which is authoritative at order time. */
+  setExecute: (id: string, execute: boolean) => Promise<void>;
 
   connect: (ids: string[]) => Promise<void>;
   disconnect: (ids: string[]) => Promise<void>;
@@ -47,6 +51,9 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
   loadAccounts: async () => {
     const accounts = await credentials.list();
     set({ accounts, loaded: true });
+    // The sidecar starts with an empty execution set and refuses live orders
+    // until told; push the persisted selection as soon as we know it.
+    pushExecutionSet(accounts);
     // Auto-connect flagged accounts that aren't already up.
     const health = get().health;
     const toConnect = accounts
@@ -67,6 +74,13 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
 
   renameAccount: async (id, nickname) => {
     await credentials.rename(id, nickname);
+    await get().loadAccounts();
+  },
+
+  setExecute: async (id, execute) => {
+    await credentials.update(id, { execute });
+    // loadAccounts re-reads the persisted config and re-pushes the set, so the
+    // sidecar can never diverge from what the Brokers page shows.
     await get().loadAccounts();
   },
 
@@ -162,6 +176,16 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
   },
 }));
 
+/** Tell the sidecar which accounts may receive live orders. Best-effort by
+ *  necessity (the sidecar may be down), but never silently wrong: the sidecar
+ *  defaults to an EMPTY set, so a dropped push means live orders are refused
+ *  with a clear message rather than routed somewhere unintended. Every
+ *  reconnect re-pushes, so the window is a moment, not a session. */
+function pushExecutionSet(accounts: BrokerAccount[]) {
+  const accountIds = accounts.filter((a) => a.execute).map((a) => a.id);
+  bridge.post("/brokers/execute", { accountIds }).catch(() => {});
+}
+
 // Wire live broker_status events + initial load once, at module load.
 let wired = false;
 export function connectBrokerStore() {
@@ -170,7 +194,11 @@ export function connectBrokerStore() {
   const store = useBrokerStore.getState();
   bridge.on(store.ingest);
   bridge.onStatus((connected) => {
-    if (connected) store.refreshHealth();
+    if (!connected) return;
+    store.refreshHealth();
+    // A sidecar restart wipes its in-memory execution set. Re-push from the
+    // persisted config so live routing is restored without user action.
+    pushExecutionSet(useBrokerStore.getState().accounts);
   });
   store.loadAccounts();
   store.refreshHealth();

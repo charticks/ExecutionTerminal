@@ -1,8 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { Popover, usePopover } from "@/components/Popover";
-import { BrokerFormDialog, RenameDialog, DeleteDialog } from "@/components/BrokerDialogs";
+import {
+  BrokerFormDialog,
+  RenameDialog,
+  DeleteDialog,
+  MultiExecuteDialog,
+  multiExecuteAcknowledged,
+} from "@/components/BrokerDialogs";
 import { useBrokerStore } from "@/stores/useBrokerStore";
 import { displayName, healthClass, type BrokerAccount } from "@/bridge/brokers";
+
+const EXECUTE_TOOLTIP =
+  "Enable this broker for live order execution. Live orders will be sent only " +
+  "to brokers with Execute enabled.";
+
+/** Tooltip for the Execute control. Always states what Execute means, and adds
+ *  why the control is unavailable when the broker is offline — a disabled
+ *  checkbox with no explanation is the usual reason people think it's broken. */
+function executeTooltip(a: BrokerAccount, isConnected: boolean): string {
+  if (isConnected) return EXECUTE_TOOLTIP;
+  return a.execute
+    ? `${EXECUTE_TOOLTIP}\n\nThis broker is enabled but currently disconnected, so it will not receive orders until it reconnects.`
+    : `${EXECUTE_TOOLTIP}\n\nConnect this broker first.`;
+}
 
 type Dialog =
   | { kind: "add" }
@@ -12,9 +32,12 @@ type Dialog =
   | null;
 
 export function Brokers() {
-  const { accounts, health, loadAccounts, connect, disconnect, deleteAccount } = useBrokerStore();
+  const { accounts, health, loadAccounts, connect, disconnect, deleteAccount, setExecute } =
+    useBrokerStore();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<Dialog>(null);
+  // Account awaiting the "you're enabling a second execution broker" confirm.
+  const [confirmMultiExec, setConfirmMultiExec] = useState<BrokerAccount | null>(null);
   const manage = usePopover();
 
   useEffect(() => {
@@ -43,6 +66,20 @@ export function Brokers() {
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
+
+  // Turning Execute ON while exactly one broker already executes takes the user
+  // from single- to multi-broker execution — the one transition where the blast
+  // radius of every future order changes. Confirm that once (unless muted).
+  // Going 2 → 3 is already multi-broker, so it does not re-prompt; turning
+  // Execute off never prompts.
+  const onExecuteChange = (account: BrokerAccount, next: boolean) => {
+    const enabledCount = accounts.filter((a) => a.execute).length;
+    if (next && enabledCount === 1 && !multiExecuteAcknowledged()) {
+      setConfirmMultiExec(account);
+      return;
+    }
+    setExecute(account.id, next);
+  };
 
   const closeDialog = () => setDialog(null);
   const afterSave = () => {
@@ -73,19 +110,39 @@ export function Brokers() {
           {accounts.map((a) => {
             const h = health[a.id]?.health;
             const detail = health[a.id]?.detail;
+            const isConnected = h === "connected";
             return (
-              <label className={`broker-row ${selected.has(a.id) ? "sel" : ""}`} key={a.id}>
-                <input
-                  type="checkbox"
-                  checked={selected.has(a.id)}
-                  onChange={() => toggle(a.id)}
-                />
-                <span className={`d ${healthClass(h)}`} title={detail ?? h ?? "disconnected"} />
-                <span className="broker-row-name">{displayName(a)}</span>
-                {detail && h !== "connected" && (
+              // A div, not a label: the row holds two independent checkboxes
+              // (select + Execute) and nesting them under one label would make
+              // clicking Execute also toggle the selection.
+              <div className={`broker-row ${selected.has(a.id) ? "sel" : ""}`} key={a.id}>
+                <label className="broker-row-select">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(a.id)}
+                    onChange={() => toggle(a.id)}
+                    aria-label={`Select ${displayName(a)}`}
+                  />
+                  <span className={`d ${healthClass(h)}`} title={detail ?? h ?? "disconnected"} />
+                  <span className="broker-row-name">{displayName(a)}</span>
+                </label>
+                <label
+                  className={`broker-row-exec ${a.execute ? "on" : ""} ${isConnected ? "" : "off"}`}
+                  title={executeTooltip(a, isConnected)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={a.execute}
+                    disabled={!isConnected}
+                    onChange={(e) => onExecuteChange(a, e.target.checked)}
+                    aria-label={`Execute live orders on ${displayName(a)}`}
+                  />
+                  <span>Execute</span>
+                </label>
+                {detail && !isConnected && (
                   <span className="broker-row-detail" title={detail}>{detail}</span>
                 )}
-              </label>
+              </div>
             );
           })}
         </div>
@@ -111,7 +168,10 @@ export function Brokers() {
                     aria-expanded={manage.open}>
               Manage ▾
             </button>
-            <Popover open={manage.open} className="manage-pop">
+            {/* Floating: the Brokers panel clips overflow, so an anchored
+                panel loses its top items when the broker list is short. */}
+            <Popover open={manage.open} className="manage-pop"
+                     anchorRef={manage.wrapRef} panelRef={manage.panelRef}>
               <button
                 className="pop-action"
                 disabled={!singleSelected}
@@ -152,6 +212,16 @@ export function Brokers() {
       )}
       {dialog?.kind === "delete" && (
         <DeleteDialog accounts={dialog.accounts} onConfirm={doDelete} onCancel={closeDialog} />
+      )}
+      {confirmMultiExec && (
+        <MultiExecuteDialog
+          account={confirmMultiExec}
+          onConfirm={() => {
+            setExecute(confirmMultiExec.id, true);
+            setConfirmMultiExec(null);
+          }}
+          onCancel={() => setConfirmMultiExec(null)}
+        />
       )}
     </section>
   );

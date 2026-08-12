@@ -1,0 +1,49 @@
+# Packages vendored into the Python runtime that ships inside Charticks.
+#
+# PINNED on purpose: this is what testers and users actually run, so it must not
+# change because an upstream release happened between two builds. The root
+# requirements.txt stays unpinned for development.
+#
+# Trimming this list: the sidecar itself imports none of pandas/numpy — they are
+# pulled in by the Dhan, Kotak and ICICI SDKs and account for ~98 MB of the
+# ~105 MB total. An Angel-only build is ~10 MB: delete the three lines marked
+# below and rebuild.
+
+# ── sidecar core ─────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+requests==2.32.3
+pyotp==2.10.0
+pytz==2024.2
+logzero==1.7.0
+
+# ── broker SDKs ──────────────────────────────────────────────────────────────
+smartapi-python==1.5.5     # Angel One   (imported as SmartApi)
+dhanhq==2.2.0              # Dhan        — pulls pandas
+breeze-connect==1.0.69     # ICICI Direct— pulls pandas
+
+# ── Kotak Neo's transitive dependencies ──────────────────────────────────────
+# Kotak's SDK is installed separately by build-runtime.mjs with --no-deps (see
+# the comment there), so the ones it genuinely needs are listed here instead.
+# Versions match the working development environment.
+bidict==0.22.1
+pyjsparser==2.7.1
+PyJWT==2.6.0
+python-dateutil==2.8.2
+python-dotenv==1.0.0
+six==1.16.0
+websocket-client==1.8.0
+
+# Kotak pins websockets==8.1 while Dhan requires >=12.0.1 and uvicorn[standard]
+# >=10.4 — mutually exclusive. Kotak's SDK imports and runs fine on a modern
+# release (verified), so the modern one wins and Kotak's pin is ignored.
+websockets==16.1
+
+# pandas is not imported by Charticks; it arrives with the three SDKs above.
+# Pinned here so the version is decided by us rather than by their resolvers.
+pandas==2.2.3
+numpy==2.1.0
+
+# pandas is not imported by Charticks; it arrives with the three SDKs above.
+# Pinned here so the version is decided by us rather than by their resolvers.
+pandas==2.2.3

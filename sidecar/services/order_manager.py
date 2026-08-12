@@ -2,10 +2,20 @@
 Tkinter app's single-branch model (app/order_manager.py:122).
 
 Paper mode returns a synthetic fill at the supplied LTP and NEVER touches a
-broker SDK. Live mode places a real order on every connected broker session
-(mirroring the legacy multi-broker fan-out). The mode is held authoritatively
-here — set via POST /trading-mode — so even a mis-routed request can't reach a
-broker while in Paper.
+broker SDK. Live mode places a real order on every account the user has enabled
+for execution on the Brokers page (BrokerManager.execution_sessions) — NOT on
+every connected account, which is how a broker connected purely for market-data
+redundancy used to receive a duplicate of every order.
+
+Mode routing is TWO-KEY. Every order request must state the mode it was composed
+under, and this module also holds the mode last confirmed by the client (POST
+/trading-mode). Routing uses the mode ON THE REQUEST — never the stored one —
+and only after the two agree. A disagreement is not resolved, it is REJECTED:
+the two keys disagreeing means the UI the user acted on and the engine about to
+act have different ideas about whether real money is at stake, and neither is
+trustworthy enough to guess from. Previously the stored mode alone decided, so a
+sidecar restart (which resets it to paper) or a dropped /trading-mode call left
+the badge and the router silently disagreeing in either direction.
 
 Scope note (C1): Angel live routing is fully ported; Kotak/Dhan live routing is
 NOT yet ported and returns a clear error rather than silently mis-firing. The
@@ -17,14 +27,19 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 from services import expiry as expiry_filter
 from services import market_session
 from services.broker_limits import limit_resolver
-from services.broker_manager import manager
+from services.broker_manager import LABEL, manager
+from services.live_book import live_book
+from services.margin import MarginRequest, margin_engine
+from services.order_sync import order_sync
 from services.order_splitter import split_quantity
 from services.paper_engine import paper_engine
+from services.risk_engine import OrderContext, risk_engine
 
 PAPER = "paper"
 LIVE = "live"
@@ -44,7 +59,7 @@ class OrderManager:
             self._parent_seq += 1
             return f"P{self._parent_seq}"
 
-    # ── mode (authoritative, backstops the client) ────────────────────────
+    # ── mode (confirmed by the client; one half of the two-key check) ─────
     def set_mode(self, mode: str) -> dict:
         mode = LIVE if str(mode).lower() == LIVE else PAPER
         with self._lock:
@@ -57,15 +72,157 @@ class OrderManager:
         with self._lock:
             return self._mode
 
+    def _resolve_mode(self, requested: str | None, action: str) -> tuple[str | None, dict | None]:
+        """Validate the mode carried by a request against the confirmed one.
+
+        Returns (mode, None) when routing may proceed on `mode`, or
+        (None, error) when it may not. Callers must route on the returned mode
+        and never on self.mode.
+        """
+        value = str(requested or "").strip().lower()
+        if value not in (PAPER, LIVE):
+            # An order with no mode is a client that predates this contract (or
+            # a hand-rolled request). Defaulting either way would be a guess.
+            return None, {
+                "ok": False, "code": "MODE_REQUIRED",
+                "error": f"This {action} request did not specify a trading mode. "
+                         f"Charticks cannot route it without one.",
+            }
+        current = self.mode
+        if value != current:
+            return None, {
+                "ok": False, "code": "MODE_MISMATCH",
+                "requestedMode": value, "activeMode": current,
+                "error": f"Trading mode mismatch — this {action} was sent as "
+                         f"{value.upper()} but Charticks is currently set to "
+                         f"{current.upper()}. Nothing was sent to any broker. "
+                         f"Re-select your trading mode, then try again.",
+            }
+        return value, None
+
     def _log(self, level: str, msg: str) -> None:
-        hub.publish(events.log_line(level, msg))
+        diagnostics.emit("orders", level, msg, publish=True)
+
+    def _margin_request(self, underlying: str, expiry: str, strike: float,
+                        opt_type: str, side: str, qty: int, lots: int,
+                        order_type: str, price: float,
+                        product: str) -> MarginRequest:
+        """Describe the order for the margin checkers, without broker vocabulary."""
+        tradingsymbol, token, exch = "", "", _ANGEL_EXCH.get(underlying, "NFO")
+        try:
+            tradingsymbol, resolved, exch = manager.resolve_option(
+                underlying, expiry, strike, opt_type)
+            token = resolved or ""
+        except Exception:
+            pass
+        ltp = None
+        if token:
+            ltp, _bid, _ask = manager.get_option_quote(token)
+        return MarginRequest(
+            underlying=underlying, expiry=expiry, strike=strike,
+            opt_type=opt_type, side=side, qty=qty, lots=lots,
+            order_type=order_type, price=price, product=product,
+            exchange=exch, tradingsymbol=tradingsymbol, token=token, ltp=ltp)
+
+    @staticmethod
+    def _token_for(underlying: str, expiry: str, strike: float, opt_type: str) -> str:
+        """Feed token for a contract, used to mark the live book to market.
+        Never fatal — an unresolvable token just means that position shows no
+        open P&L until the instrument master catches up."""
+        try:
+            _sym, token, _exch = manager.resolve_option(underlying, expiry, strike, opt_type)
+            return token or ""
+        except Exception:
+            return ""
+
+    def _risk_context(self, route_mode: str, underlying: str, expiry: str,
+                      strike: float, opt_type: str, side: str, qty: int,
+                      lots: int, order_type: str, price: float, product: str,
+                      validity: str, override_max_pos: bool,
+                      allow_duplicate: bool) -> OrderContext:
+        """Snapshot the runtime state the rules need, from whichever book is
+        authoritative for this mode. Resolving the quote here (rather than in a
+        rule) keeps the rules pure and means one lookup covers all of them."""
+        ltp = None
+        meta: dict | None = None
+        try:
+            _sym, token, _exch = manager.resolve_option(underlying, expiry, strike, opt_type)
+            if token:
+                ltp, _bid, _ask = manager.get_option_quote(token)
+            meta = manager.option_meta(underlying, expiry, strike, opt_type)
+        except Exception as exc:
+            # A missing quote weakens the away-from-market check but must not
+            # block the order — the rule treats ltp=None as "cannot compare".
+            diagnostics.event("risk", "Quote lookup for validation", "failed",
+                              level="warn", symbol=f"{underlying} {expiry} "
+                              f"{int(strike)} {opt_type}", reason=str(exc))
+
+        book = live_book if route_mode == LIVE else paper_engine
+        cap, splits, unsupported = self._broker_constraints(
+            route_mode, underlying, product, meta)
+        return OrderContext(
+            mode=route_mode, underlying=underlying, expiry=expiry, strike=strike,
+            opt_type=opt_type, side=side, qty=qty, lots=lots,
+            order_type=order_type, price=price, product=product, validity=validity,
+            config=risk_engine.config, ltp=ltp,
+            open_positions=book.open_count(),
+            held_lots=book.held_lots(underlying, expiry, strike, opt_type),
+            orders_today=book.orders_today(),
+            session_pnl=book.session_pnl(),
+            lot_size=(meta or {}).get("lotSize"),
+            tick_size=(meta or {}).get("tickSize"),
+            spot=manager.index_ltp.get(underlying),
+            feed_stale=manager.feed_stale(),
+            broker_qty_cap=cap,
+            supports_splitting=splits,
+            unsupported_product=unsupported,
+            duplicate_of=book.working_order_id(underlying, expiry, strike, opt_type, side),
+            override_max_pos=override_max_pos,
+            allow_duplicate=allow_duplicate,
+        )
+
+    # Products each broker genuinely supports for options. ICICI's Breeze
+    # exposes a single "options" product with no intraday variant, so an MIS
+    # order there used to be logged as a warning and placed as carry-forward —
+    # silently turning an intraday trade into a positional one.
+    _BROKER_PRODUCTS = {"icici": ("NRML",)}
+
+    def _broker_constraints(self, route_mode: str, underlying: str, product: str,
+                            meta: dict | None) -> tuple[int | None, bool, str | None]:
+        """Tightest per-order quantity cap across the target brokers, whether
+        they can all split, and the first broker that cannot honour `product`."""
+        if route_mode != LIVE:
+            return None, True, None
+        caps: list[int] = []
+        splits = True
+        unsupported: str | None = None
+        lot_size = (meta or {}).get("lotSize") or 0
+        for account_id, broker, sess in manager.execution_sessions():
+            allowed = self._BROKER_PRODUCTS.get(broker)
+            if allowed and product not in allowed and unsupported is None:
+                unsupported = LABEL.get(broker, broker)
+            try:
+                limits = limit_resolver.resolve(account_id, broker, sess, underlying)
+            except Exception:
+                continue
+            # hard_cap_qty, not cap_qty: we want the freeze limit itself even
+            # when this broker cannot split, which is exactly the case the
+            # freeze-quantity rule exists to reject.
+            cap = limits.hard_cap_qty(lot_size) if lot_size else None
+            if cap:
+                caps.append(int(cap))
+            if not getattr(limits, "supports_splitting", True):
+                splits = False
+        return (min(caps) if caps else None), splits, unsupported
 
     # ── entry point ────────────────────────────────────────────────────────
-    def place_order(self, underlying: str, expiry: str, strike: float,
-                    opt_type: str, side: str, qty: int, order_type: str,
-                    price: float, lots: int = 0, rule: dict | None = None,
+    def place_order(self, mode: str | None, underlying: str, expiry: str,
+                    strike: float, opt_type: str, side: str, qty: int,
+                    order_type: str, price: float, lots: int = 0,
+                    rule: dict | None = None,
                     product: str = "NRML", validity: str = "DAY",
-                    allow_duplicate: bool = False) -> dict:
+                    allow_duplicate: bool = False,
+                    override_max_pos: bool = False) -> dict:
         underlying = (underlying or "").upper()
         opt_type = (opt_type or "").upper()
         side = (side or "").upper()
@@ -73,6 +230,15 @@ class OrderManager:
         product = (product or "NRML").upper()
         validity = (validity or "DAY").upper()
         symbol_hint = f"{underlying}{expiry}{int(strike)}{opt_type}"
+
+        # Mode gate FIRST: resolve which engine this order was composed for
+        # before doing anything else, so a mismatched request is rejected before
+        # it can touch a session, an engine, or the duplicate-order book.
+        route_mode, mode_error = self._resolve_mode(mode, "order")
+        if mode_error:
+            self._log("warn", f"[order] ⛔ {side} {qty} {symbol_hint} rejected — "
+                              f"{mode_error['code']}")
+            return mode_error
 
         # Market-session gate — ahead of the paper/live fork so ONE check covers
         # both engines and no request can reach a broker outside market hours.
@@ -88,9 +254,22 @@ class OrderManager:
             return {"ok": False, "code": "EXPIRED_CONTRACT",
                     "error": f"{underlying} {expiry} has expired — pick an active expiry."}
 
+        # Configured trading rules — Max Quantity / Max Price / tick grid /
+        # Max Positions / Max Trades / Max Loss / Profit Target. Server-side and
+        # ahead of the fork, so no order of either kind can slip past a limit
+        # the user has set. See services/risk_engine.py.
+        violation = risk_engine.validate(
+            self._risk_context(route_mode, underlying, expiry, strike, opt_type,
+                               side, qty, lots or qty, order_type, price, product,
+                               validity, override_max_pos, allow_duplicate))
+        if violation is not None:
+            self._log("warn", f"[order] ⛔ {side} {qty} {symbol_hint} rejected — "
+                              f"{violation.code}")
+            return violation.as_response()
+
         # PAPER: route to the tick-driven paper execution engine (realistic
         # market/limit fills against internal bid/ask, MTM, validation) — no SDK.
-        if self.mode != LIVE:
+        if route_mode != LIVE:
             res = paper_engine.place(underlying, expiry, strike, opt_type, side,
                                      qty, lots or qty, order_type, price, rule,
                                      product, validity, allow_duplicate)
@@ -100,10 +279,48 @@ class OrderManager:
             self._log(lvl, f"[order] {msg}")
             return res
 
-        # LIVE: fan out to every connected session (legacy multi-broker model).
-        sessions = manager.connected_sessions()
+        # LIVE: fan out to the accounts the user opted in to on the Brokers page
+        # — NOT to every connected broker. Connectivity buys market data and
+        # account services; execution is a separate, explicit choice, so adding
+        # a second broker for feed redundancy can't silently double a position.
+        if not manager.execution_accounts():
+            self._log("warn", f"[order] ⛔ {side} {qty} {symbol_hint} rejected — "
+                              f"no execution broker selected")
+            return {"ok": False, "code": "NO_EXECUTION_BROKER",
+                    "error": "No execution broker selected. Please enable Execute "
+                             "on at least one connected broker."}
+        sessions = manager.execution_sessions()
         if not sessions:
-            return {"ok": False, "error": "No connected broker to place a live order."}
+            # Opted in somewhere, but none of those accounts is connected — a
+            # different problem from "nothing selected", so say so.
+            self._log("warn", f"[order] ⛔ {side} {qty} {symbol_hint} rejected — "
+                              f"no execution broker is connected")
+            return {"ok": False, "code": "EXECUTION_BROKER_DISCONNECTED",
+                    "error": "No execution broker is connected. Connect a broker "
+                             "that has Execute enabled, or enable Execute on one "
+                             "that is already connected."}
+
+        # Pre-trade margin — AFTER every risk rule, BEFORE any broker API call.
+        # Fail-safe and all-or-nothing: an unverifiable margin at any single
+        # execution broker rejects the whole order rather than fanning out
+        # partially. See services/margin/.
+        rejection = margin_engine.validate(
+            sessions,
+            self._margin_request(underlying, expiry, strike, opt_type, side,
+                                 qty, lots or qty, order_type, price, product))
+        if rejection is not None:
+            self._log("warn", f"[order] ⛔ {side} {qty} {symbol_hint} rejected — "
+                              f"{rejection.code}")
+            return rejection.as_response()
+
+        # Open the duplicate window BEFORE routing, so a second request racing
+        # this one is rejected rather than both reaching the broker.
+        live_book.note_submitted(underlying, expiry, strike, opt_type, side)
+        diagnostics.event("orders", "Place Order", "started", mode=LIVE,
+                          symbol=symbol_hint, side=side, qty=qty,
+                          orderType=order_type, price=price, product=product,
+                          validity=validity,
+                          accounts=len(sessions))
 
         results: list[dict] = []
         for account_id, broker, sess in sessions:
@@ -113,12 +330,32 @@ class OrderManager:
                                              product, validity, symbol_hint)
             res["account"] = account_id
             results.append(res)
-            # ONE order_update per account (the parent), never one per child —
-            # splitting must stay invisible in the UI.
-            status = "COMPLETE" if res.get("ok") else "REJECTED"
-            hub.publish(events.order_update(
-                str(res.get("orderId") or f"{broker}-{symbol_hint}"),
-                symbol_hint, side, int(res.get("executedQty") or qty), price, status))
+            submitted = int(res.get("executedQty") or (qty if res.get("ok") else 0))
+            diagnostics.event(
+                "orders", "Place Order",
+                "submitted" if res.get("ok") else "rejected",
+                broker=LABEL.get(broker, broker), account=account_id,
+                symbol=symbol_hint, side=side, requestedQty=qty,
+                submittedQty=submitted, orderId=res.get("orderId"),
+                code=res.get("code"), reason=res.get("error"))
+            # Hand the order to the synchronization engine rather than booking a
+            # position here. An order id means ACCEPTED FOR ROUTING, not filled:
+            # booking it immediately is what made the terminal show positions
+            # that did not exist. The engine polls the broker's own order book
+            # and books the position only on confirmed filled quantity.
+            if res.get("ok") and res.get("orderId"):
+                requested_lots = lots or qty
+                lot_size = max(1, qty // requested_lots) if requested_lots else 1
+                order_sync.track(
+                    str(res["orderId"]), account_id, broker, underlying, expiry,
+                    strike, opt_type, side, submitted or qty, lot_size, price,
+                    token=self._token_for(underlying, expiry, strike, opt_type),
+                    rule=rule)
+            else:
+                # Nothing to track — report the rejection once, here.
+                hub.publish(events.order_update(
+                    str(res.get("orderId") or f"{broker}-{symbol_hint}"),
+                    symbol_hint, side, qty, price, "REJECTED"))
 
         ok = any(r.get("ok") for r in results)
         out = {"ok": ok, "results": results, "symbol": symbol_hint}
@@ -129,6 +366,78 @@ class OrderManager:
             out.update({k: partial[k] for k in
                         ("code", "error", "executedQty", "remainingQty") if k in partial})
         return out
+
+    # ── exits (automation + manual square-off) ─────────────────────────────
+    def place_exit(self, underlying: str, expiry: str, strike: float,
+                   opt_type: str, side: str, qty: int, lots: int,
+                   reason: str = "exit", position_key: str = "") -> dict:
+        """Close broker-confirmed exposure at market.
+
+        Separate entry point from place_order because an exit is a different
+        kind of request: it reduces risk rather than adding it, so entry-only
+        rules (kill switch, session locks, position caps, notional, duplicate)
+        stand down and no margin check is performed — closing a long needs no
+        margin, and closing a short releases it. Structural and price checks
+        still apply; a malformed exit is still malformed.
+
+        Quantity is supplied by the caller from the CONFIRMED position book, so
+        this can only ever close what the broker has actually filled.
+        """
+        underlying, opt_type, side = underlying.upper(), opt_type.upper(), side.upper()
+        symbol_hint = f"{underlying}{expiry}{int(strike)}{opt_type}"
+
+        if self.mode != LIVE:
+            return {"ok": False, "code": "NOT_LIVE",
+                    "error": "Live exits are only routed in live mode."}
+        closed = market_session.require_open(underlying)
+        if closed:
+            # Exits are still session-gated: the exchange will not accept one
+            # outside hours either, and pretending otherwise hides the real
+            # reason a stop could not act.
+            self._log("warn", f"[order] ⛔ exit {side} {qty} {symbol_hint} — market closed")
+            return closed
+
+        sessions = manager.execution_sessions()
+        if not sessions:
+            self._log("error", f"[order] ⛔ exit {side} {qty} {symbol_hint} — "
+                               f"no execution broker connected")
+            return {"ok": False, "code": "EXECUTION_BROKER_DISCONNECTED",
+                    "error": "No execution broker is connected to close this position."}
+
+        ctx = self._risk_context(LIVE, underlying, expiry, strike, opt_type, side,
+                                 qty, lots or qty, "MARKET", 0.0, "NRML", "DAY",
+                                 override_max_pos=True, allow_duplicate=True)
+        ctx.is_exit = True
+        violation = risk_engine.validate(ctx)
+        if violation is not None:
+            self._log("error", f"[order] ⛔ exit {side} {qty} {symbol_hint} rejected — "
+                               f"{violation.code}")
+            return violation.as_response()
+
+        results = []
+        for account_id, broker, sess in sessions:
+            res = self._place_with_splitting(account_id, broker, sess, underlying,
+                                             expiry, strike, opt_type, side, qty,
+                                             "MARKET", 0.0, lots or qty,
+                                             "NRML", "DAY", symbol_hint)
+            res["account"] = account_id
+            results.append(res)
+            diagnostics.event(
+                "orders", "Exit order", "submitted" if res.get("ok") else "rejected",
+                level="warn", broker=LABEL.get(broker, broker), account=account_id,
+                symbol=symbol_hint, side=side, qty=qty, reason=reason,
+                orderId=res.get("orderId"), detail=res.get("error"))
+            if res.get("ok") and res.get("orderId"):
+                order_sync.track(
+                    str(res["orderId"]), account_id, broker, underlying, expiry,
+                    strike, opt_type, side, qty,
+                    max(1, qty // max(1, lots or qty)), 0.0,
+                    token=self._token_for(underlying, expiry, strike, opt_type),
+                    exit_for=position_key)
+        ok = any(r.get("ok") for r in results)
+        return {"ok": ok, "results": results, "symbol": symbol_hint,
+                "error": None if ok else "; ".join(
+                    str(r.get("error")) for r in results if r.get("error"))}
 
     # ── splitting-aware live submission for a single account ───────────────
     def _place_with_splitting(self, account_id: str, broker: str, sess: Any,
@@ -271,11 +580,9 @@ class OrderManager:
             return {"ok": False, "broker": "icici",
                     "error": f"Unparseable expiry '{expiry}' for ICICI"}
 
-        if product != "NRML":
-            # Breeze exposes one options product; record the downgrade rather
-            # than silently routing an MIS order as carry-forward.
-            self._log("warn", f"[order] ICICI has no separate {product} product for "
-                              f"options — placing as 'options'")
+        # A non-NRML product never reaches here: rule_broker_capability rejects
+        # it up front. Placing an MIS order as carry-forward silently changed
+        # what the user asked for, so it is now a rejection, not a downgrade.
         params = {
             "stock_code": stock_code,
             "exchange_code": self._ICICI_EXCH.get(underlying, "NFO"),
@@ -310,20 +617,28 @@ class OrderManager:
                 "tradingsymbol": f"{stock_code} {expiry} {int(strike)} {opt_type}"}
 
     # ── modify / cancel (paper → engine; live routing not yet ported) ──────
-    def modify_order(self, order_id: str, price: float | None,
+    # Same two-key mode contract as place_order: a cancel composed against the
+    # paper book must never be applied by a live-mode engine, or vice versa.
+    def modify_order(self, mode: str | None, order_id: str, price: float | None,
                      qty: int | None, lots: int | None) -> dict:
+        route_mode, mode_error = self._resolve_mode(mode, "modify")
+        if mode_error:
+            return mode_error
         closed = market_session.require_open(paper_engine.underlying_of(order_id))
         if closed:
             return closed
-        if self.mode != LIVE:
+        if route_mode != LIVE:
             return paper_engine.modify(order_id, price, qty, lots)
         return {"ok": False, "error": "Live order modification is not available yet."}
 
-    def cancel_order(self, order_id: str) -> dict:
+    def cancel_order(self, mode: str | None, order_id: str) -> dict:
+        route_mode, mode_error = self._resolve_mode(mode, "cancel")
+        if mode_error:
+            return mode_error
         closed = market_session.require_open(paper_engine.underlying_of(order_id))
         if closed:
             return closed
-        if self.mode != LIVE:
+        if route_mode != LIVE:
             return paper_engine.cancel(order_id)
         return {"ok": False, "error": "Live order cancellation is not available yet."}
 

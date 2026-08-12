@@ -1,0 +1,9 @@
+﻿Charticks - distribution checksums
+Generated : 2026-08-10 12:51:58
+
+Verify with:
+  Get-FileHash ".\Charticks Setup 0.1.0.exe" -Algorithm SHA256
+
+SHA256  C03F4C022B72BC25F2CC72FCEE8A8E3FE8E5795CE70966447735E14DC271408A
+FILE    Charticks Setup 0.1.0.exe
+BYTES   166734639

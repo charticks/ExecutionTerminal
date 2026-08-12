@@ -34,6 +34,7 @@ import time
 from typing import Any
 
 from services.instruments import InstrumentKey, instruments
+from services.paths import data_dir
 from services.reliability.retry_manager import RetryManager
 from services.reliability.transport import Transport, TransportCallbacks
 from services.reliability.ws_manager import WebSocketManager
@@ -54,16 +55,17 @@ def import_breeze():
     """Import BreezeConnect despite the SDK's bare ``import config``.
 
     breeze_connect/breeze_connect.py does a top-level ``import config`` — an
-    ABSOLUTE import of a bare module name, not ``from . import config``.
-    BrokerManager puts the Charticks project root at sys.path[0] so the legacy
-    app's modules resolve, and that root contains its own config.py (the user's
-    broker credentials). The SDK therefore imports CHARTICKS' config and dies
-    on ``AttributeError: SECURITY_MASTER_URL`` — every time, in production, not
-    just under test.
+    ABSOLUTE import of a bare module name, not ``from . import config``. Which
+    ``config`` that resolves to depends on whatever happens to be on sys.path,
+    so the SDK is one stray same-named module away from dying on
+    ``AttributeError: SECURITY_MASTER_URL``. (It used to be exactly that: the
+    project root carried a config.py of broker credentials and was on sys.path
+    for the legacy Tkinter app. Both are gone, but the SDK is still fragile.)
 
-    So the SDK's own package directory is put first for the duration of the
-    import, and any cached ``config`` is set aside and restored afterwards so
-    everything else in the process keeps resolving Charticks' config.
+    So its own config is pre-seeded into sys.modules under the bare name for the
+    duration of the import, and both sys.modules and sys.path are restored
+    afterwards — the SDK inserts its directory into sys.path itself and would
+    otherwise leave it shadowing ``config`` for the rest of the process.
     """
     with _IMPORT_LOCK:
         cached = sys.modules.get("breeze_connect")
@@ -246,12 +248,7 @@ class ICICIFeed(MarketFeed):
         # re-login (apply_session) — never by this feed re-authenticating.
         self.needs_reauth = False
 
-        import os
-        cache_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))))),
-            "app", "data_cache")
-        self.scrip = ICICIScripMaster(cache_dir, self.host.log)
+        self.scrip = ICICIScripMaster(data_dir(), self.host.log)
         self._scrip_day: str | None = None
 
         self._index_keys: set[InstrumentKey] = set()
