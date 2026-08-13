@@ -16,6 +16,7 @@ import { activeExpiries, resolveActiveExpiry } from "@/lib/expiry";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PartialFillDialog } from "@/components/PartialFillDialog";
 import { MaxPositionDialog } from "@/components/MaxPositionDialog";
+import { DuplicateOrderDialog } from "@/components/DuplicateOrderDialog";
 
 type ChainFilter = "all" | "calls" | "puts";
 const STRIKE_RANGES = [5, 10, 15, 20, 25, 30];
@@ -222,6 +223,17 @@ export function OptionChainPanel() {
       price: number; requested: number; remaining: number;
     } | null
   >(null);
+  // The sidecar held an order because an identical one was just placed, or
+  // because a previous attempt was never acknowledged. Only the user can say
+  // whether to send it anyway, so the request is replayed with the override.
+  const [dupPrompt, setDupPrompt] = useState<
+    {
+      code: "DUPLICATE_ORDER" | "IDEMPOTENCY_UNRESOLVED";
+      message: string; symbol?: string; side?: string; qty?: number;
+      duplicateOf?: string; placedSecondsAgo?: number | null;
+      input: OrderInput;
+    } | null
+  >(null);
   // Open positions drive the "already held" hover hint and the add-vs-new
   // decision on every strike.
   const positions = usePositionsStore((s) => s.positions);
@@ -421,6 +433,20 @@ export function OptionChainPanel() {
           setPartial({
             executedQty: res.executedQty ?? 0,
             remainingQty: res.remainingQty ?? 0,
+            input,
+          });
+        } else if (res.code === "DUPLICATE_ORDER"
+                   || res.code === "IDEMPOTENCY_UNRESOLVED") {
+          // Duplicate protection held it. Ask, then replay the SAME order with
+          // the override if the user insists — never auto-retry.
+          setDupPrompt({
+            code: res.code,
+            message: res.error ?? "",
+            symbol: res.symbol,
+            side: res.side,
+            qty: res.qty,
+            duplicateOf: res.duplicateOf,
+            placedSecondsAgo: res.placedSecondsAgo,
             input,
           });
         } else if (res.error && !res.error.startsWith("Duplicate")) {
@@ -738,6 +764,27 @@ export function OptionChainPanel() {
         onCancel={() => setDupOrderId(null)}
       />
 
+      <DuplicateOrderDialog
+        open={!!dupPrompt}
+        code={dupPrompt?.code ?? "DUPLICATE_ORDER"}
+        message={dupPrompt?.message ?? ""}
+        symbol={dupPrompt?.symbol}
+        side={dupPrompt?.side}
+        qty={dupPrompt?.qty}
+        duplicateOf={dupPrompt?.duplicateOf}
+        placedSecondsAgo={dupPrompt?.placedSecondsAgo}
+        onCancel={() => setDupPrompt(null)}
+        onPlaceAnyway={() => {
+          const pending = dupPrompt;
+          setDupPrompt(null);
+          if (!pending) return;
+          void (async () => {
+            const res = await placeOrder({ ...pending.input, overrideDuplicate: true });
+            if (!res.ok && res.error) setBlocked(res.error);
+            else registerTrade();
+          })();
+        }}
+      />
       <MaxPositionDialog
         open={maxPosPrompt != null}
         requestedLots={maxPosPrompt?.requested ?? 0}

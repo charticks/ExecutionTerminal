@@ -30,11 +30,30 @@ interface TradingModeState {
   /** Wipe the client-side paper session (orders + positions) so Paper and Live
    *  never intermingle. Called when starting a fresh paper session. */
   clearPaperSession: () => void;
+  /** Blank the client-side order/trade/position mirror WITHOUT resetting either
+   *  engine. The mirror only ever shows the active mode's book. */
+  clearLedger: () => void;
+}
+
+function clearLedger() {
+  useOrdersStore.setState({ orders: [], trades: [], nextId: 1 });
+  usePositionsStore.setState({ positions: [] });
 }
 
 export const useTradingModeStore = create<TradingModeState>((set) => ({
   mode: load(),
   setMode: (mode) => {
+    // ALWAYS blank the mirror on a mode change. The order book, trade book and
+    // position grid are a mirror of ONE engine's state, and the two engines'
+    // rows are indistinguishable once rendered — a paper fill left on screen
+    // after switching to Live reads as a real trade, which is exactly what the
+    // "save paper session" option used to cause.
+    //
+    // Nothing is lost: each engine keeps its own book (the sidecar's paper
+    // engine, and the Order Synchronization Engine for live), and the mirror is
+    // repainted from whichever is now active — see paperSync.paint() and
+    // liveOrderSync.paintLiveBook().
+    clearLedger();
     localStorage.setItem(KEY, mode);
     set({ mode });
     pushMode(mode);
@@ -44,9 +63,9 @@ export const useTradingModeStore = create<TradingModeState>((set) => ({
     // local mirror so the UI blanks immediately (the reset also pushes an empty
     // paper_state snapshot).
     bridge.post("/paper/reset").catch(() => {});
-    useOrdersStore.setState({ orders: [], trades: [], nextId: 1 });
-    usePositionsStore.setState({ positions: [] });
+    clearLedger();
   },
+  clearLedger,
 }));
 
 function pushMode(mode: TradingMode) {

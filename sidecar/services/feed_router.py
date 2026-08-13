@@ -105,6 +105,25 @@ class FeedRouter:
         with self._lock:
             return list(self._feeds.values())
 
+    def scrip_of(self, broker: str, session=None):
+        """A broker's loaded scrip master, or None.
+
+        For callers that hold a SESSION rather than an account id — margin
+        checkers and the order router's modify path both do, because a broker's
+        API is addressed through its session. Where the feed holds that same
+        client object (Kotak shares one session between feed and orders) identity
+        picks the exact feed; otherwise the first feed of that broker answers,
+        which is sound because a scrip master is a broker-wide instrument list,
+        not per-account data — two accounts at one broker resolve a contract
+        identically.
+        """
+        candidates = [f for f in self.feeds() if getattr(f, "broker", "") == broker]
+        if session is not None:
+            for feed in candidates:
+                if getattr(feed, "client", None) is session:
+                    return getattr(feed, "scrip", None)
+        return getattr(candidates[0], "scrip", None) if candidates else None
+
     def primary_feed(self, capability: str) -> MarketFeed | None:
         with self._lock:
             aid = self._primary.get(capability)

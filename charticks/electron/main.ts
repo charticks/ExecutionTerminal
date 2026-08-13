@@ -195,14 +195,86 @@ function createWindow() {
 
   win.once("ready-to-show", () => win?.show());
 
-  if (DEV_SERVER_URL) {
-    win.loadURL(DEV_SERVER_URL);
-    win.webContents.openDevTools({ mode: "detach" });
-  } else {
-    win.loadFile(join(__dirname, "..", "dist", "index.html"));
-  }
+  // A failed load must RETRY. Without this the window opened on a blank page and
+  // stayed there until the user pressed Ctrl+R: `loadURL` / `loadFile` reject
+  // asynchronously, nothing was listening, and 'ready-to-show' fires for the
+  // error page too — so the app showed a black window with only the menu bar.
+  //
+  // In dev the cause is a race: Electron is spawned as soon as the main bundle
+  // is written, which can be before Vite's dev server is accepting connections,
+  // and the load fails with ERR_CONNECTION_REFUSED. Packaged builds load from
+  // disk and rarely fail, but a retry costs nothing and the symptom was
+  // indistinguishable to the user.
+  win.webContents.on("did-fail-load", (_e, code, description, url, isMainFrame) => {
+    // Sub-frames and navigation the user cancelled are not our problem.
+    if (!isMainFrame || code === -3) return;
+    console.error("[window] load failed", code, description, url);
+    scheduleRendererLoad(`${description} (${code})`);
+  });
 
-  win.on("closed", () => (win = null));
+  loadRenderer();
+  if (DEV_SERVER_URL) win.webContents.openDevTools({ mode: "detach" });
+
+  win.on("closed", () => {
+    win = null;
+    rendererAttempt = 0;
+    if (rendererRetry) {
+      clearTimeout(rendererRetry);
+      rendererRetry = null;
+    }
+  });
+}
+
+// Renderer load retry state. Bounded, so a genuinely broken build reports itself
+// instead of retrying behind a black window forever.
+const RENDERER_MAX_ATTEMPTS = 40;      // ~30s at the delays below
+const RENDERER_RETRY_MS = 750;
+let rendererAttempt = 0;
+let rendererRetry: NodeJS.Timeout | null = null;
+
+function loadRenderer() {
+  if (!win) return;
+  rendererAttempt += 1;
+  const target = DEV_SERVER_URL
+    ? win.loadURL(DEV_SERVER_URL)
+    : win.loadFile(join(__dirname, "..", "dist", "index.html"));
+  // loadURL/loadFile reject on failure. Unhandled, that rejection was the whole
+  // bug — the failure was invisible and nothing retried.
+  target
+    .then(() => {
+      rendererAttempt = 0;
+    })
+    .catch((err: Error) => scheduleRendererLoad(err.message));
+}
+
+function scheduleRendererLoad(reason: string) {
+  if (!win || rendererRetry) return;
+  if (rendererAttempt >= RENDERER_MAX_ATTEMPTS) {
+    reportRendererFailure(reason);
+    return;
+  }
+  rendererRetry = setTimeout(() => {
+    rendererRetry = null;
+    loadRenderer();
+  }, RENDERER_RETRY_MS);
+}
+
+/** Tell the user, once, that the interface could not be loaded. A black window
+ *  with no explanation is the worst possible outcome — they cannot tell it from
+ *  a hung app, and the previous behaviour gave them exactly that. */
+let reportedRendererFailure = false;
+function reportRendererFailure(reason: string) {
+  if (reportedRendererFailure) return;
+  reportedRendererFailure = true;
+  win?.show();
+  dialog.showErrorBox(
+    "Charticks could not load its interface",
+    `The application window failed to load after ${RENDERER_MAX_ATTEMPTS} attempts.\n\n` +
+      `Last error: ${reason}\n\n` +
+      (DEV_SERVER_URL
+        ? `Expected the Vite dev server at ${DEV_SERVER_URL}. Make sure it is running.`
+        : "The installation may be incomplete — try reinstalling Charticks.")
+  );
 }
 
 // Expose bridge connection details to the renderer via IPC.

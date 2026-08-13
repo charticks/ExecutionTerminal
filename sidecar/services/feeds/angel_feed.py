@@ -67,7 +67,24 @@ class AngelTransport(Transport):
 
         ws.on_open = lambda _ws: cb.on_open()
         ws.on_data = lambda _ws, msg: cb.on_data(msg)
-        ws.on_close = lambda _ws: cb.on_close()
+        ws.on_close = lambda *_a: cb.on_close()
+
+        # The SDK's own close notification is broken against the websocket-client
+        # version it depends on, and the failure is silent.
+        #
+        # websocket-client >= 1.0 invokes on_close with three arguments
+        # (app, close_status_code, close_reason); SmartWebSocketV2._on_close
+        # accepts one. WebSocketApp._callback swallows the resulting TypeError,
+        # logs it to a logger nobody reads, and then feeds the TypeError to
+        # on_error — which, with max_retry_attempt=0, reports
+        # "Max retry attempt reached: Connection closed" and closes for good.
+        #
+        # So a dropped Angel feed produced an on_error and NEVER an on_close.
+        # Overriding the bound method before connect() builds the WebSocketApp
+        # (it passes self._on_close in the constructor) restores the close
+        # signal; ws_manager's error path is the backstop if a future SDK
+        # version breaks it again.
+        ws._on_close = lambda *_a: cb.on_close()
 
         def _on_error(a: Any, b: Any) -> None:
             # SmartWebSocketV2 signals a give-up as

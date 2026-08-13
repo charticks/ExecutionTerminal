@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from .base import MarginQuote, MarginRequest, MarginUnavailable, pluck, register
+from .base import (MarginQuote, MarginRequest, MarginUnavailable, pluck,
+                   pluck_field, register)
 
 _EXCHANGE = {"BFO": "BFO"}
 
@@ -13,17 +14,19 @@ def _exchange_code(req: MarginRequest) -> str:
     return _EXCHANGE.get(req.exchange, "NFO")
 
 
-def _available(session: Any) -> float:
+def _available(session: Any) -> tuple[float, str]:
     try:
         response = session.get_funds()
     except Exception as exc:
         raise MarginUnavailable(f"ICICI get_funds() failed: {exc}") from exc
-    cash = pluck(response, "allocated_equity", "allocated_fno",
-                 "total_bank_balance", "unallocated_balance")
+    # F&O allocation first: an options order draws on that, and allocated_equity
+    # can be non-zero while nothing is allocated to derivatives.
+    cash, field = pluck_field(response, "allocated_fno", "allocated_equity",
+                              "unallocated_balance", "total_bank_balance")
     if cash is None:
         raise MarginUnavailable("ICICI get_funds() returned no recognisable "
                                 "balance")
-    return cash
+    return cash, f"icici:getFunds.{field}"
 
 
 def _required(session: Any, req: MarginRequest, stock_code: str) -> tuple[float, bool, str]:
@@ -81,10 +84,11 @@ def check(session: Any, req: MarginRequest) -> MarginQuote:
             f"ICICI stock code for {req.underlying} is unknown (scrip master "
             f"not loaded) — cannot price the margin requirement")
 
-    available = _available(session)
+    available, available_source = _available(session)
     required, estimated, source = _required(session, req, stock_code)
     return MarginQuote(required=required, available=available, source=source,
-                       estimated_requirement=estimated)
+                       estimated_requirement=estimated,
+                       available_source=available_source)
 
 
 register("icici", check)

@@ -74,6 +74,11 @@ class MarginQuote:
     available: float
     source: str                 # how it was obtained — goes into the log
     estimated_requirement: bool = False  # derived, not quoted by the broker
+    # Which balance field the broker's response was read from. Logged on every
+    # rejection: "available=0" is unactionable on its own, because it cannot be
+    # told apart from having read the wrong field of a response that did carry
+    # the balance.
+    available_source: str = ""
 
     @property
     def sufficient(self) -> bool:
@@ -103,6 +108,17 @@ def registered_brokers() -> list[str]:
     return sorted(_CHECKERS)
 
 
+def scrip_of(broker: str, session: Any) -> Any:
+    """A broker's loaded scrip master, or None — see FeedRouter.scrip_of.
+
+    Imported lazily: services.broker_manager pulls in the whole feed layer, and
+    this module is imported by every margin adapter at registration time.
+    """
+    from services.broker_manager import manager
+
+    return manager.router.scrip_of(broker, session)
+
+
 # ── shared parsing helpers ────────────────────────────────────────────────
 # Every Indian broker SDK returns loosely-typed JSON with its own casing and
 # its own spelling (Dhan really does ship "availabelBalance"). These keep that
@@ -122,30 +138,52 @@ def as_float(value: Any) -> float | None:
         return None
 
 
-def pluck(payload: Any, *keys: str) -> float | None:
-    """First parseable numeric value among `keys`, searched case-insensitively
-    and recursively through nested dicts.
+def _find(payload: Any, wanted: str) -> float | None:
+    """Numeric value of one key, case-insensitive, searched recursively.
 
-    Broker responses nest their real payload under "data", "Success" or
-    similar, and rename fields between SDK versions; matching on a set of
-    candidate names is more durable than a fixed path.
+    Broker responses nest their real payload under "data", "Success" or similar,
+    so a fixed path is not durable across SDK versions.
     """
     if not isinstance(payload, dict):
         return None
-    wanted = {k.lower() for k in keys}
     for key, value in payload.items():
-        if str(key).lower() in wanted:
+        if str(key).lower() == wanted:
             number = as_float(value)
             if number is not None:
                 return number
     for value in payload.values():
         if isinstance(value, dict):
-            found = pluck(value, *keys)
+            found = _find(value, wanted)
             if found is not None:
                 return found
         elif isinstance(value, list):
             for item in value:
-                found = pluck(item, *keys)
+                found = _find(item, wanted)
                 if found is not None:
                     return found
     return None
+
+
+def pluck_field(payload: Any, *keys: str) -> tuple[float | None, str]:
+    """(value, field name) for the first of `keys` that is present and numeric.
+
+    `keys` is a PRIORITY ORDER, and is honoured as one. This used to walk the
+    response once and return whichever candidate name happened to appear first
+    in the broker's own JSON — so for a balance asked for as
+    ("availablecash", ..., "net", ...) an account whose `net` sat above
+    `availablecash` in the payload was read as `net`. On an account with open
+    positions or funds in another segment those two figures differ, and reading
+    the wrong one silently understates the balance.
+
+    The field name is returned so a rejection can say which number it used.
+    """
+    for key in keys:
+        found = _find(payload, key.lower())
+        if found is not None:
+            return found, key
+    return None, ""
+
+
+def pluck(payload: Any, *keys: str) -> float | None:
+    """`pluck_field` when only the value is wanted."""
+    return pluck_field(payload, *keys)[0]

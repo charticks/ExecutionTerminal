@@ -138,6 +138,23 @@ class BrokerManager:
                 if self._health.get(aid) == CONNECTED
             ]
 
+    def live_session(self, account_id: str) -> tuple[str, Any] | None:
+        """(broker, session) for one connected account, or None.
+
+        Deliberately NOT filtered by the execution opt-in: this is what a modify
+        or a cancel resolves against, and a user who turns Execute off still has
+        to be able to pull a working order they already placed. Same principle as
+        the kill switch allowing exits — a control that traps you in an order is
+        not a safety feature.
+        """
+        with self._lock:
+            if self._health.get(account_id) != CONNECTED:
+                return None
+            session = self._sessions.get(account_id)
+            if session is None:
+                return None
+            return self._broker.get(account_id, ""), session
+
     # ── execution selection (which accounts may receive LIVE orders) ───────
     def set_execution_accounts(self, account_ids: list[str]) -> dict:
         """Replace the execution set. Authoritative for live routing; the

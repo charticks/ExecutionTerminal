@@ -11,12 +11,18 @@ Server-side risk validation services/risk_engine.py          (16 rules)
      ↓
 Pre-trade margin validation services/margin/                 (per broker)
      ↓
-Broker order placement      order_manager._place_with_splitting
+Idempotency claim           services/idempotency/            (per broker)
+     ↓
+Broker order placement      order_manager._submit_once       (the only seam)
      ↓
 Order synchronization       services/order_sync/             (per broker)
      ↓
 Position booked             services/live_book.py            (confirmed fills only)
 ```
+
+Idempotency sits last before the wire on purpose: a claim is only worth taking
+for an order that has already passed every check and is genuinely about to be
+sent. See `docs/IDEMPOTENCY.md`.
 
 Both new layers follow the same shape as the rest of the sidecar: a
 broker-independent core plus a per-broker adapter that registers itself. Adding a
@@ -91,12 +97,67 @@ Every transition and every booked fill is written to `logs/orders.log` with the
 broker's own raw status alongside the canonical one — when a mapping turns out to
 be wrong, that raw value is the only way to see it after the fact.
 
+## Amending a working order
+
+_Added 2026-08-13. All four connected brokers place, modify and cancel live._
+
+```
+Order Engine → _LIVE_PLACERS    → angel | kotak | icici | dhan
+             → _LIVE_MODIFIERS  → angel | kotak | icici | dhan
+             → _LIVE_CANCELLERS → angel | kotak | icici | dhan
+```
+
+Three dispatch tables, one entry per broker each; adding a broker stays one
+method plus one table entry, and a broker missing from a table gets a clear "not
+available yet" rather than a crash.
+
+**Modify restates the order, not the change.** Every broker's modify API wants
+the whole order back — Angel and Kotak both require product, order type and
+validity — so the fields the user did not touch are read from the tracked order
+rather than defaulted. Defaulting them silently rewrote an MIS order as NRML.
+This is why `TrackedOrder` carries `product` / `order_type` / `validity`.
+
+**A price on a modify implies a limit.** Amending the price of a MARKET order
+converts it to LIMIT rather than dropping the price, which is what the user
+asked for by typing one.
+
+**Quantity may arrive as lots**, and is multiplied by the tracked `lot_size` —
+the same unit the broker's per-order limit is expressed in.
+
+**Amends resolve to the orders that really exist.** `order_sync.resolve()` maps
+the id the UI holds to live, non-terminal orders. A split order resolves to
+**every child**, so a cancel cannot pull one leg of three and leave an
+unbalanced position; a partial outcome is reported as `PARTIAL_AMEND` naming how
+many legs succeeded, never as the first error alone.
+
+**Not-working and not-known are different answers.** An already-filled order
+returns `ORDER_NOT_WORKING`; an id Charticks never placed returns
+`UNKNOWN_ORDER`. Neither reaches a broker.
+
+**Cancel is allowed on an account that is no longer opted in to execution**
+(`BrokerManager.live_session` deliberately ignores the Execute flag). Same
+principle as the kill switch permitting exits: a control that traps you in a
+working order is not a safety feature.
+
+**No broker reports a rejection by raising.** SmartAPI returns
+`{"status": false}`, NeoAPI returns `{"Error": …}` or `{"stat": "Not_Ok"}`,
+dhanhq returns `{"status": "failure"}` (and can return `orderStatus: REJECTED`
+inside a 200), Breeze returns a non-200 `Status`. Each adapter checks its own
+shape, because "did not raise" is not "was accepted".
+
+**State is never written by the amend path.** On success it calls
+`order_sync.poll_soon()`; the broker's own order book remains the only authority
+on what an order became.
+
 ## Not yet built
 
-- **Idempotency keys (Phase 2).** Deliberately deferred: a client order id is
-  only useful once there is a synchronization layer to reconcile it against.
-  That layer now exists, so this is the natural next step. Note that Dhan
-  already exposes `get_order_by_correlationID`, which is the hook for it.
+- **Idempotent modify / cancel.** Placement is idempotent (see
+  `docs/IDEMPOTENCY.md`); amendments are not. They address an existing broker
+  order id, so a repeat is at worst a no-op rather than a second position.
 - **Fills made outside Charticks.** The sync engine reads the broker's order
   book but only tracks orders it placed, so a trade made in the broker's own app
   is still invisible to the position book.
+- **Resizing a split order.** A price amend applies to every leg, but a quantity
+  change is refused (`SPLIT_QTY_NOT_MODIFIABLE`) — one new quantity has no single
+  correct meaning across legs, and applying it per leg would multiply the
+  position. Cancel and re-place is the honest path.

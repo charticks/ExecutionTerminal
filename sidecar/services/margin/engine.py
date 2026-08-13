@@ -175,7 +175,8 @@ class MarginEngine:
             requiredMargin=details.get("requiredMargin"),
             availableMargin=details.get("availableMargin"),
             shortfall=details.get("shortfall"),
-            source=quote.source if quote else None)
+            source=quote.source if quote else None,
+            availableFrom=quote.available_source if quote else None)
         return MarginRejection(code, message, details)
 
 

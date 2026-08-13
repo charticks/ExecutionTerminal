@@ -1,18 +1,36 @@
-"""Phase-0 market simulator.
+"""Phase-0 market simulator — OFF unless explicitly asked for.
 
 Stands in for the real broker engines so the whole stack (Electron → React →
-bridge → data plane) can be verified end-to-end without live credentials. In
-Phase 1 this module is replaced by the reused engines in ../engines wired to the
-same EventHub — the renderer contract does not change.
+bridge → data plane) can be verified end-to-end without live credentials.
+
+**It is disabled by default and must stay that way.** It publishes three
+hardcoded positions and a fabricated net P&L, and they arrive on the SAME events
+as real broker data, so on screen they are indistinguishable from real trades.
+That is acceptable for a phase-0 demo and unacceptable in a live-trading build:
+it put invented positions in front of a user about to risk real money, and —
+worse — it only stood down *while* a broker was connected, so a mid-session
+disconnect made fake positions reappear alongside genuine ones.
+
+Set CHARTICKS_SIMULATE=1 to turn it on for a demo or a no-credentials smoke
+test. Anything else, including unset, leaves it off.
 """
 from __future__ import annotations
 
+import os
 import random
 import threading
 import time
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
+
+ENV_FLAG = "CHARTICKS_SIMULATE"
+
+
+def enabled() -> bool:
+    """Whether simulated market data may be published at all."""
+    return os.environ.get(ENV_FLAG, "").strip().lower() in ("1", "true", "yes", "on")
 
 INDICES = [
     {"symbol": "NIFTY", "ltp": 24903.5, "chg": 0.62},
@@ -49,7 +67,14 @@ _lock = threading.Lock()
 
 
 def snapshot_events() -> list[dict]:
-    """State events to replay to a client the moment it connects."""
+    """State events to replay to a client the moment it connects.
+
+    Empty unless simulation is on. This used to replay a fabricated net P&L
+    (₹18,420) to EVERY connecting client, so a freshly launched live terminal
+    opened showing a profit nobody had made.
+    """
+    if not enabled():
+        return []
     return [events.pnl_update(round(_net_pnl, 0))]
 
 
@@ -119,4 +144,20 @@ def _run() -> None:
 
 
 def start() -> None:
+    """Start publishing simulated data — only when explicitly enabled.
+
+    The no-op path is logged as well as the active one: "why am I seeing no index
+    prices before login" and "why am I seeing positions I never opened" are both
+    questions the log should answer directly.
+    """
+    if not enabled():
+        diagnostics.emit("app", "info",
+                         "Market simulator disabled — no simulated indices, "
+                         "positions or P&L will be published",
+                         flag=ENV_FLAG)
+        return
+    diagnostics.emit("app", "warn",
+                     "MARKET SIMULATOR ENABLED — indices, positions and P&L are "
+                     "FABRICATED. Never use this for live trading.",
+                     flag=ENV_FLAG)
     threading.Thread(target=_run, name="charticks-simulator", daemon=True).start()

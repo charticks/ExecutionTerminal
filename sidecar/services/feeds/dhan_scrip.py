@@ -42,6 +42,14 @@ SEG_BSE = 4
 SEG_MCX = 5
 SEG_BSE_FNO = 8
 
+# The SAME segments as the REST API names them. Dhan's order endpoints take a
+# string ("NSE_FNO"), its market feed takes an int (2) — the two are not
+# interchangeable, and an order sent with a feed code is rejected. Derived from
+# the master's own classification rather than a second table keyed by
+# underlying, so the feed and the order router cannot drift apart.
+REST_SEGMENT = {SEG_NSE_FNO: "NSE_FNO", SEG_BSE_FNO: "BSE_FNO", SEG_MCX: "MCX_COMM",
+                SEG_NSE: "NSE_EQ", SEG_BSE: "BSE_EQ"}
+
 # Dhan spells some index underlyings differently from Charticks' canonical name.
 _UNDERLYING_ALIAS = {
     "NIFTY 50": "NIFTY", "NIFTY50": "NIFTY",
@@ -303,3 +311,11 @@ class DhanScripMaster:
     def bindings(self) -> list[tuple[InstrumentKey, str]]:
         """(InstrumentKey, securityId) pairs for the instruments registry."""
         return list(self._bindings)
+
+    def rest_segment_for(self, key: InstrumentKey) -> str:
+        """The REST exchange segment for a contract, or "" if not in the master.
+
+        Empty is a refusal, not a default: guessing NSE_FNO for a commodity
+        would route a CRUDEOIL order to the wrong exchange.
+        """
+        return REST_SEGMENT.get(self.segments.get(key, -1), "")

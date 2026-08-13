@@ -3,24 +3,35 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import MarginQuote, MarginRequest, MarginUnavailable, pluck, register
+from .base import (MarginQuote, MarginRequest, MarginUnavailable, pluck,
+                   pluck_field, register)
 
 _PRODUCT = {"NRML": "CARRYFORWARD", "MIS": "INTRADAY"}
 
 
-def _available(session: Any) -> float:
-    """Free cash from rmsLimit(). No fallback: an unknown balance is never
-    assumed, because assuming it is what this whole check exists to prevent."""
+def _available(session: Any) -> tuple[float, str]:
+    """(free cash, which field it came from) from rmsLimit().
+
+    No fallback: an unknown balance is never assumed, because assuming it is
+    what this whole check exists to prevent.
+
+    `availablecash` is asked for first and the order matters — `net` is the
+    balance after utilised debits and can read 0 on an account that has cash but
+    open positions. Note also that rmsLimit() reports the EQUITY segment: funds
+    held only in the commodity ledger do not appear here, which is why the field
+    name travels with the number into the log.
+    """
     try:
         response = session.rmsLimit()
     except Exception as exc:
         raise MarginUnavailable(f"Angel rmsLimit() failed: {exc}") from exc
-    cash = pluck(response, "availablecash", "availableCash", "net",
-                 "availableintradaypayin", "availablelimitmargin")
+    cash, field = pluck_field(response, "availablecash", "availableCash",
+                              "availableintradaypayin", "availablelimitmargin",
+                              "net")
     if cash is None:
         raise MarginUnavailable("Angel rmsLimit() returned no recognisable "
                                 "cash balance")
-    return cash
+    return cash, f"angel:rmsLimit.{field}"
 
 
 def _required(session: Any, req: MarginRequest) -> tuple[float, bool, str]:
@@ -58,10 +69,11 @@ def _required(session: Any, req: MarginRequest) -> tuple[float, bool, str]:
 
 
 def check(session: Any, req: MarginRequest) -> MarginQuote:
-    available = _available(session)
+    available, available_source = _available(session)
     required, estimated, source = _required(session, req)
     return MarginQuote(required=required, available=available, source=source,
-                       estimated_requirement=estimated)
+                       estimated_requirement=estimated,
+                       available_source=available_source)
 
 
 register("angel", check)

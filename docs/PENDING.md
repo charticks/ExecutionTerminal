@@ -89,5 +89,13 @@ per-broker adapter, selected by connected broker — **not** three always-on soc
   positions. Add persistence if session survival matters.
 - **Paper now requires a connected broker feed** (no offline mock fallback) —
   intended, but flag for UX.
-- **Live order routing for Kotak / Dhan not ported** (`order_manager` returns a
-  clear "not available yet"). Live modify / cancel also not ported.
+- ~~Live order routing for Kotak / Dhan not ported. Live modify / cancel also
+  not ported.~~ **Done 2026-08-13**: all four connected brokers (Angel, Kotak,
+  ICICI, Dhan) now place, modify and cancel live. See `docs/ORDER-PIPELINE.md`.
+- ~~Idempotency keys still not implemented — a placement retried after a timeout
+  can double up.~~ **Done 2026-08-13**: broker-independent framework in
+  `sidecar/services/idempotency/`, native `correlationId` on Dhan, tag echo on
+  Kotak/ICICI, attribute matching on Angel. See `docs/IDEMPOTENCY.md`.
+- **Fills made outside Charticks** are still invisible to the position book: the
+  sync engine reads the broker's order book but only tracks orders it placed, so
+  a trade made in the broker's own app never appears.

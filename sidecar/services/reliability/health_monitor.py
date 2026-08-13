@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Callable
 
+import diagnostics
 from bridge import events
 from bridge.hub import hub
 
@@ -109,12 +110,23 @@ class ConnectionHealthMonitor:
             if (now - self._last_forced.get(wsm.name, 0.0)) < FORCE_COOLDOWN:
                 continue
             self._last_forced[wsm.name] = now
-            hub.publish(events.log_line(
-                "warn", f"[health] {wsm.name} stale/zombie — forcing reconnect"))
+            # diagnostics, not hub alone: this watchdog is the last line of
+            # defence for a dead feed, and its actions were previously visible
+            # only in the live UI panel. When a feed stayed down, websocket.log
+            # showed the failure and nothing about the recovery attempts — the
+            # one question the log was there to answer.
+            diagnostics.emit("websocket", "warn",
+                             f"[health] {wsm.name} stale/zombie — forcing reconnect",
+                             publish=True, feed=wsm.name,
+                             connected=wsm.connected, stale=wsm.stale,
+                             downFor=round(now - since, 1),
+                             lastError=wsm.last_error)
             try:
                 wsm.reconnect()
-            except Exception as e:
-                hub.publish(events.log_line("warn", f"[health] forced reconnect failed: {e}"))
+            except Exception as exc:
+                diagnostics.exception("websocket", "[health] forced reconnect failed",
+                                      exc_info=exc, feed=wsm.name)
+                hub.publish(events.log_line("warn", f"[health] forced reconnect failed: {exc}"))
 
     def force_reconnect_all(self) -> None:
         """Immediately force a fresh connection on every running feed — called on

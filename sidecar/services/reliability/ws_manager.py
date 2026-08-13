@@ -26,6 +26,18 @@ from bridge.hub import hub
 from .retry_manager import RetryManager
 from .transport import Transport, TransportCallbacks
 
+# How long a connection that reported an error is given to either recover on its
+# own or close cleanly, before it is treated as ended and retried.
+#
+# This exists because on_close is not a guarantee. An SDK can report a terminal
+# failure through on_error and never close: SmartWebSocketV2 hands its give-up to
+# on_error("Max retry attempt reached", "Connection closed") and, on
+# websocket-client >= 1.0, its own on_close never survives the call (see
+# AngelTransport). Reconnect used to be driven by on_close alone, so that
+# combination left the feed down with no timer scheduled — permanently, until the
+# app was restarted.
+ERROR_GRACE_S = 10.0
+
 
 class WebSocketManager:
     def __init__(
@@ -133,6 +145,48 @@ class WebSocketManager:
             transport = self._build_transport()
             self._transport = transport
 
+            # Every way a connection can end funnels through end_session, and it
+            # runs at most once per generation. Both properties matter: on_close
+            # is not guaranteed to fire (see ERROR_GRACE_S), so on_error must
+            # also be able to end the session — and when both do fire, only one
+            # retry timer may be started.
+            ended = threading.Event()
+
+            def end_session(why: str) -> None:
+                if gen != self._generation or ended.is_set():
+                    return
+                ended.set()
+                was_connected = self.connected
+                self.connected = False
+                if not self.should_run:
+                    return
+                if not was_connected:
+                    # Never opened — count it so a feed that can't establish at
+                    # all is distinguishable from one that drops mid-session.
+                    self.consecutive_failures += 1
+                self._log("warn", f"{why} — reconnecting"
+                          + (f" (attempt {self.consecutive_failures}, last error: {self.last_error})"
+                             if self.last_error and not was_connected else ""))
+                self._schedule_retry()
+
+            def watch_after_error(detail: str) -> None:
+                """A connected socket that errored is given ERROR_GRACE_S to
+                prove it is still alive. A tick arriving in that window means the
+                error was incidental; silence means the socket is a zombie and
+                nothing else is going to tell us."""
+                mark = self.last_tick_ts
+
+                def watch() -> None:
+                    time.sleep(ERROR_GRACE_S)
+                    if gen != self._generation or ended.is_set():
+                        return
+                    if self.last_tick_ts != mark:
+                        return  # data still flowing; the error was not terminal
+                    end_session(f"no data {ERROR_GRACE_S:.0f}s after error ({detail})")
+
+                threading.Thread(target=watch, daemon=True,
+                                 name=f"{self.name}-error-grace").start()
+
             def on_open() -> None:
                 if gen != self._generation:
                     return
@@ -178,22 +232,16 @@ class WebSocketManager:
                 routine = "already closed" in detail.lower()
                 self._log("info" if routine else "warn",
                           f"error ({classification}): {detail}")
+                # An error must be able to end the session, because on_close may
+                # never come. If we were never open there is nothing to wait for;
+                # if we were, give the socket a moment to prove itself first.
+                if not self.connected:
+                    end_session(f"error before open ({classification})")
+                else:
+                    watch_after_error(detail)
 
             def on_close() -> None:
-                if gen != self._generation:
-                    return
-                was_connected = self.connected
-                self.connected = False
-                if not self.should_run:
-                    return
-                if not was_connected:
-                    # Never opened — count it so a feed that can't establish at
-                    # all is distinguishable from one that drops mid-session.
-                    self.consecutive_failures += 1
-                self._log("warn", "disconnected — reconnecting"
-                          + (f" (attempt {self.consecutive_failures}, last error: {self.last_error})"
-                             if self.last_error and not was_connected else ""))
-                self._schedule_retry()
+                end_session("disconnected")
 
             transport.open(TransportCallbacks(on_open=on_open, on_data=on_data,
                                               on_error=on_error, on_close=on_close))

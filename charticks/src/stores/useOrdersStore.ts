@@ -78,6 +78,12 @@ export interface OrderInput {
   /** The user knowingly exceeded Max Position. The sidecar enforces that limit
    *  independently, so the choice must be declared rather than assumed. */
   overrideMaxPos?: boolean;
+  /** The user was shown "an identical order was placed N seconds ago" (or "a
+   *  previous attempt could not be confirmed") and chose to send this one
+   *  anyway. Travels with the single request and is never a stored preference,
+   *  so a confirmation cannot leave duplicate protection switched off.
+   *  See docs/IDEMPOTENCY.md. */
+  overrideDuplicate?: boolean;
 }
 
 export interface PlaceResult {
@@ -85,12 +91,24 @@ export interface PlaceResult {
   error?: string;
   /** Machine-readable rejection reason from the sidecar — "MARKET_CLOSED",
    *  "DUPLICATE_PENDING", "PARTIAL_FILL", "NO_EXECUTION_BROKER",
-   *  "EXECUTION_BROKER_DISCONNECTED", "MODE_REQUIRED" or "MODE_MISMATCH".
-   *  Mirrors the sidecar contract. */
+   *  "EXECUTION_BROKER_DISCONNECTED", "MODE_REQUIRED", "MODE_MISMATCH",
+   *  "DUPLICATE_ORDER" or "IDEMPOTENCY_UNRESOLVED". Mirrors the sidecar
+   *  contract. */
   code?: string;
   /** Present when code === "PARTIAL_FILL": a split order stopped part-way. */
   executedQty?: number;
   remainingQty?: number;
+  /** Duplicate protection held the order (code "DUPLICATE_ORDER" or
+   *  "IDEMPOTENCY_UNRESOLVED"). `overridable` says the user may resend with
+   *  `overrideDuplicate`; the rest describes what was already placed so the
+   *  prompt can name it. */
+  overridable?: boolean;
+  duplicateOf?: string;
+  placedSecondsAgo?: number | null;
+  clientOrderId?: string;
+  symbol?: string;
+  side?: string;
+  qty?: number;
 }
 
 /** Instrument + side identity used by the duplicate-pending-order rule. */
@@ -171,6 +189,7 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
       product: input.product ?? "NRML",
       validity: input.validity ?? "DAY",
       overrideMaxPos: input.overrideMaxPos ?? false,
+      overrideDuplicate: input.overrideDuplicate ?? false,
     };
 
     // LIVE: record a PENDING order for visibility, then reconcile on response.

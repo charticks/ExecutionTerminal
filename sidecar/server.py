@@ -21,6 +21,7 @@ from services import market_session
 from services import simulator
 from services.broker_manager import manager as broker_manager
 from services import market_data
+from services.idempotency import store as idempotency_store
 from services.instruments import instruments
 from services.kill_switch import kill_switch
 from services.live_book import live_book
@@ -195,6 +196,17 @@ async def orders_sync_state(authorization: str | None = Header(default=None)) ->
     return JSONResponse(order_sync.snapshot())
 
 
+@app.get("/orders/idempotency")
+async def orders_idempotency(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Client-order-id claims, including any whose outcome is still unknown.
+
+    An unresolved claim means Charticks sent an order and never learned whether
+    the broker took it — the one state that will refuse a later identical order,
+    so it has to be inspectable without reading a log file."""
+    _check_bearer(authorization)
+    return JSONResponse(idempotency_store.snapshot())
+
+
 @app.get("/live-book")
 async def live_book_state(authorization: str | None = Header(default=None)) -> JSONResponse:
     """The sidecar's own record of live positions, for diagnostics — this is
@@ -228,6 +240,17 @@ async def orders_place(body: dict, authorization: str | None = Header(default=No
         # Explicit, logged breach of the Max Position limit ("Always Override",
         # or the user answering the Ask Me prompt). Never inferred.
         bool(body.get("overrideMaxPos", False)),
+        # Idempotency: a client that reissues the SAME id when retrying gives the
+        # strongest possible duplicate signal, because it knows the two requests
+        # are one intent. Optional — when absent the order's own parameters are
+        # fingerprinted instead, which still catches double-clicks and restarts.
+        # See services/idempotency/.
+        str(body.get("clientRequestId") or ""),
+        # The user was shown "an identical order was placed N seconds ago" and
+        # chose to send this one anyway. Scoped to this request and never
+        # inferred, exactly like overrideMaxPos — a confirmation must not be able
+        # to leave duplicate protection switched off.
+        bool(body.get("overrideDuplicate", False)),
     )
     return JSONResponse(result)
 
@@ -419,8 +442,9 @@ async def stream(ws: WebSocket) -> None:
     q = hub.register()
     try:
         # Replay current state so a late-joining client is immediately correct.
-        # Real broker health comes from the broker manager; market data (indices,
-        # positions, pnl) still comes from the simulator in this phase.
+        # Everything here is real: broker health, the kill-switch state, and the
+        # live order book. The simulator contributes nothing unless it has been
+        # explicitly enabled (see services/simulator.py).
         for event in broker_manager.snapshot_events():
             await ws.send_json(event)
         # A halt must be visible immediately to a reloaded window, not only to
