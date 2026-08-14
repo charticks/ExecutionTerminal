@@ -54,6 +54,88 @@ SESSION_EXPIRED = "session_expired"
 DOWN = "down"
 
 
+# ── Kotak Neo login helpers ──────────────────────────────────────────────────
+# Kotak's login is two calls that share hidden state inside the SDK, and its
+# errors arrive in a shape nothing else uses. Keeping that here means the
+# connect path reads as the sequence it is.
+
+def _kotak_mobile(mobile: str) -> str:
+    """Kotak wants the mobile number in international form (+91XXXXXXXXXX).
+
+    A bare ten-digit number is what a user naturally types and what their broker
+    profile shows, and it fails the login with an error that does not mention
+    the number at all. Normalising it here is safe — anything that is not
+    exactly ten digits is passed through untouched, so a number that already
+    carries a country code, or belongs to another country, is never rewritten.
+    """
+    text = mobile.strip().replace(" ", "").replace("-", "")
+    if text.startswith("+"):
+        return text
+    # "09876543210" — the trunk-prefixed form people write on forms.
+    if len(text) == 11 and text.startswith("0") and text.isdigit():
+        text = text[1:]
+    # "919876543210" — the country code without the plus.
+    if len(text) == 12 and text.startswith("91") and text.isdigit():
+        return f"+{text}"
+    if len(text) == 10 and text.isdigit():
+        return f"+91{text}"
+    return text
+
+
+def _kotak_error(response) -> str:
+    """The human-readable error in a Kotak response, or "" when there is none.
+
+    Kotak reports failures as ``{"error": [{"code": "400", "message": "..."}]}``
+    — a LIST of objects, which `str()` renders as unreadable Python repr. The
+    messages are joined so the user sees Kotak's own words.
+    """
+    if not isinstance(response, dict):
+        return "" if response is not None else "Kotak returned no response"
+    raw = response.get("error") or response.get("Error") or response.get("fault")
+    if not raw:
+        return ""
+    if isinstance(raw, list):
+        parts = []
+        for item in raw:
+            if isinstance(item, dict):
+                parts.append(str(item.get("message") or item.get("code") or item))
+            else:
+                parts.append(str(item))
+        return "; ".join(p for p in parts if p)
+    if isinstance(raw, dict):
+        return str(raw.get("message") or raw.get("description") or raw)
+    return str(raw)
+
+
+def _kotak_session_started(client) -> bool:
+    """Did step 1 actually establish a session inside the SDK?
+
+    The authoritative test, because it is the state step 2 depends on: the SDK
+    stores the view token and session id on its configuration and sends them as
+    the `Auth` and `Sid` headers. A response that merely looked successful but
+    left these unset is a failed login.
+    """
+    try:
+        config = client.api_client.configuration
+        return bool(getattr(config, "view_token", None) and getattr(config, "sid", None))
+    except Exception:
+        # An SDK version that stores this elsewhere must not be reported as a
+        # failure — the response check above already stands on its own.
+        return True
+
+
+# Why a Kotak login usually fails, in the order worth checking. Attached to the
+# error so the user has somewhere to go; the SDK's own message says only that a
+# field was rejected, never which credential was wrong.
+_KOTAK_LOGIN_HINTS = (
+    "Check, in this order: (1) the TOTP secret — Kotak's code must match your "
+    "authenticator right now, and a PC clock more than ~30s out will fail every "
+    "time; (2) the mobile number, which must be the one registered with Kotak; "
+    "(3) the UCC, from your Kotak profile; (4) the MPIN; (5) the Consumer Key "
+    "from your Kotak Neo API app."
+)
+
+
 class BrokerManager:
     """Owns broker sessions + health, keyed by account id. Thread-safe;
     connect/disconnect run on a worker thread (the REST endpoints hand off)."""
@@ -447,37 +529,50 @@ class BrokerManager:
             kotak = NeoAPI(consumer_key=consumer_key, environment="prod",
                            access_token=None, neo_fin_key=None)
             kotak_totp = pyotp.TOTP(totp_secret).now()
+            mobile_number = _kotak_mobile(str(mobile))
+            if mobile_number != str(mobile):
+                self._log("info", f"🔄 Kotak Neo: using mobile number in "
+                                  f"international form ({mobile_number[:3]}…)")
             self._log("info", "🔄 Kotak Neo: Step 1 — totp_login()...")
-            login_resp = kotak.totp_login(mobile_number=str(mobile), ucc=str(ucc), totp=kotak_totp)
-            if isinstance(login_resp, dict):
-                err1 = (login_resp.get("error") or login_resp.get("Error")
-                        or login_resp.get("message", ""))
-                stat1 = str(login_resp.get("status", "")).lower()
-                if err1 and stat1 not in ("ok", "success", "200", ""):
-                    raise Exception(f"Kotak totp_login() failed — {err1}")
+            login_resp = kotak.totp_login(mobile_number=mobile_number,
+                                          ucc=str(ucc), totp=kotak_totp)
+
+            # Step 1 must be checked STRICTLY, and on the SDK's own state rather
+            # than on the shape of the response.
+            #
+            # `TotpAPI.totp_login` sets `configuration.view_token` and
+            # `configuration.sid` ONLY on an HTTP 2xx. `totp_validate` then sends
+            # those as the `Auth` and `Sid` headers — so when step 1 fails, step 2
+            # fails with "Missing required field 'Auth'" / "'Sid'", which says
+            # nothing about the actual cause.
+            #
+            # That is exactly what used to be reported, because the old guard was
+            # `if err1 and stat1 not in ("ok", "success", "200", "")`: a failed
+            # login returns {"error": [...]} with NO "status" key, so `stat1` was
+            # "", which is in that tuple, so the condition was False and the real
+            # error was thrown away. Any error here is now fatal, and its own
+            # message is what the user sees.
+            error1 = _kotak_error(login_resp)
+            if error1:
+                raise Exception(f"{error1} (at Kotak's TOTP login step)")
+            if not _kotak_session_started(kotak):
+                raise Exception(
+                    f"Kotak accepted the TOTP login request but returned no "
+                    f"session token. Raw response: {login_resp!r}")
+
             self._log("info", "🔄 Kotak Neo: Step 2 — totp_validate() MPIN...")
             resp = kotak.totp_validate(mpin=str(mpin))
 
-            kotak_ok = False
-            if resp is not None:
-                if isinstance(resp, dict):
-                    status_val = str(resp.get("status", "")).lower()
-                    error_val = resp.get("error") or resp.get("Error") or resp.get("fault")
-                    has_token = bool(resp.get("token") or resp.get("access_token")
-                                     or resp.get("trade_token")
-                                     or (isinstance(resp.get("data"), dict)
-                                         and (resp["data"].get("token")
-                                              or resp["data"].get("trade_token"))))
-                    if not error_val:
-                        if status_val in ("ok", "success", "200") or has_token:
-                            kotak_ok = True
-                        elif status_val == "":
-                            kotak_ok = True
-                elif resp is True or str(resp).lower() in ("ok", "success"):
-                    kotak_ok = True
-
-            if not kotak_ok:
-                raise Exception(f"Kotak login response did not indicate success. Raw: {resp}")
+            # Step 2, checked the same way: its own error first, then whether a
+            # session actually exists. An MPIN rejection has to say so, rather
+            # than fall through to a generic "did not indicate success".
+            error2 = _kotak_error(resp)
+            if error2:
+                raise Exception(f"{error2} (at Kotak's MPIN step)")
+            if not _kotak_session_started(kotak):
+                raise Exception(
+                    f"Kotak accepted the MPIN but returned no session token. "
+                    f"Raw response: {resp!r}")
             with self._lock:
                 self._sessions[account_id] = kotak
             self._set_health(account_id, "kotak", CONNECTED)
@@ -491,9 +586,14 @@ class BrokerManager:
             self._start_feed(account_id, "kotak", session_tokens={"client": kotak})
             return {"ok": True}
         except Exception as e:
-            self._set_health(account_id, "kotak", SESSION_EXPIRED, str(e))
+            # Kotak's own message names a rejected FIELD, never which credential
+            # was wrong, so the checklist travels with it — otherwise the user is
+            # left re-entering all five in the hope of hitting the right one.
+            detail = f"{e} — {_KOTAK_LOGIN_HINTS}"
+            self._set_health(account_id, "kotak", SESSION_EXPIRED, detail)
             self._log("error", f"❌ Kotak Neo Login Failed: {e}")
-            return {"ok": False, "error": str(e)}
+            self._log("info", f"ℹ️  {_KOTAK_LOGIN_HINTS}")
+            return {"ok": False, "error": detail}
 
     # ── Dhan HQ (reuses login.py:266-308 sequence) ────────────────────────
     def _connect_dhan(self, account_id: str, creds: dict) -> dict:
