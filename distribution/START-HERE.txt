@@ -16,17 +16,31 @@ TO INSTALL
 BEFORE YOU TRADE - READ THIS
   Open KNOWN-LIMITATIONS.html.
 
-  In LIVE mode you CAN open a position and close it from the app
-  (fully, partially, or all at once with Square Off All).
+  START IN PAPER MODE. Everything works there and no order ever
+  leaves your PC. Only switch to Live once you have seen the app
+  behave the way you expect.
 
-  But NOTHING EXITS AUTOMATICALLY. Stop Loss, Target and Trailing
-  Stop Loss do NOT work on live positions. A live position closes
-  only when you close it.
+  In LIVE mode the app DOES act on your positions by itself:
+  Stop Loss, Target, Trailing Stop Loss and Portfolio Trail Profit
+  all send real exit orders when they are hit.
 
-  Keep your broker's own app or website open as a backup exit, in
-  case this app, your PC or your internet fails.
+  >> THE MOST IMPORTANT THING TO UNDERSTAND <<
 
-  PAPER mode has no such limits - everything works there.
+  Those stops live INSIDE THIS APPLICATION. There is no stop order
+  resting at the exchange.
+
+  So if Charticks closes, your PC crashes, or your internet drops,
+  NOTHING is protecting the position any more - and your broker is
+  still holding it. The app warns you if you try to quit while it
+  is managing live positions.
+
+  Keep your broker's own app or website open as a backup exit. If
+  you also place a stop there, be aware you could end up exiting
+  twice - check your broker positions after any automatic exit.
+
+  This has been built and tested, but NOT yet proven on a real
+  account through a full trading day. Treat your first sessions as
+  a test: one lot, and watch what it does.
 
 
 THE OTHER FILES
@@ -39,12 +53,28 @@ THE OTHER FILES
   Double-click any .html file to open it in your browser.
 
 
+BEFORE YOU INSTALL
+  If you already have an older Charticks, UNINSTALL IT FIRST
+  (Settings > Apps > Charticks > Uninstall). Earlier versions
+  packaged the trading engine differently, and leftover files can
+  stop the new one starting.
+
+  You need a few GB of free disk space. The app downloads the
+  day's instrument list (about 40 MB) and writes logs; on a full
+  disk it re-downloads it every launch and startup gets very slow.
+
+
 IF SOMETHING GOES WRONG
   Send three things:
     1. A screenshot of the whole window
     2. What you did just before it happened
     3. Everything in this folder:  %APPDATA%\Charticks\logs
-       (application.log is the most useful single file)
+
+  The most useful files are:
+    startup.log         why the app was slow to start
+    sidecar-process.log why the trading engine did not start
+    orders.log          what was sent to your broker, and when
+    application.log     everything else
 
   Never share your broker credentials. Crop or blur them out of
   any screenshot first.
