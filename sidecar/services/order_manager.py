@@ -789,6 +789,70 @@ class OrderManager:
     _KOTAK_SIDE = {"BUY": "B", "SELL": "S"}
     _KOTAK_ORDER_TYPE = {"MARKET": "MKT", "LIMIT": "L"}
 
+    @staticmethod
+    def _kotak_feed(account_id: str):
+        """This account's Kotak feed, which owns the instrument list."""
+        try:
+            return manager.router.feed_for(account_id)
+        except Exception:
+            return None
+
+    def _kotak_reload_symbol(self, account_id: str, key) -> str:
+        """Re-read Kotak's instrument list once, then look the contract up again.
+
+        The instrument list is loaded at login. If that download failed, every
+        order was rejected for the rest of the session with an instruction to
+        reconnect — a repair the engine can attempt itself, and the moment a
+        user is trying to trade is exactly when it is worth attempting.
+        """
+        feed = self._kotak_feed(account_id)
+        if feed is None or not hasattr(feed, "reload_instruments"):
+            return ""
+        self._log("warn", f"[order] Kotak does not list {key} — reloading its "
+                          f"instrument master before rejecting the order")
+        try:
+            if not feed.reload_instruments():
+                return ""
+        except Exception as exc:
+            diagnostics.exception("orders", "Kotak instrument reload failed",
+                                  exc_info=exc, symbol=str(key))
+            return ""
+        from services.instruments import instruments as registry
+        return registry.token_for("kotak", key) or ""
+
+    def _kotak_unknown_symbol(self, account_id: str, underlying: str, expiry: str,
+                              strike: float, opt_type: str) -> str:
+        """Say WHY the contract could not be resolved.
+
+        Three quite different situations produced one message that fitted none
+        of them: the list never loaded, the list loaded but does not contain
+        this contract, or Kotak does not trade this underlying at all. Only the
+        first is fixed by reconnecting.
+        """
+        contract = f"{underlying} {expiry} {int(strike)} {opt_type}"
+        feed = self._kotak_feed(account_id)
+        scrip = getattr(feed, "scrip", None) if feed is not None else None
+        loaded = int(getattr(scrip, "row_count", 0) or 0)
+        reason = getattr(scrip, "last_error", None) if scrip is not None else None
+
+        if feed is None:
+            return (f"Kotak has no market-data feed attached to this account, so "
+                    f"{contract} cannot be resolved. Reconnect the Kotak account.")
+        if loaded == 0:
+            return (f"Kotak's instrument list could not be loaded"
+                    + (f" ({reason})" if reason else "")
+                    + f", so {contract} cannot be traded. Charticks retries this "
+                      f"automatically; if it keeps failing, reconnect the Kotak "
+                      f"account and check broker.log.")
+        from services.feeds.kotak_scrip import OPT_SEGMENT
+        if underlying.upper() not in OPT_SEGMENT:
+            return (f"Charticks does not have a Kotak exchange segment mapped for "
+                    f"{underlying}, so it cannot route {contract} there.")
+        return (f"Kotak's instrument list ({loaded:,} instruments) does not contain "
+                f"{contract}. Check the expiry is one Kotak lists — its master is "
+                f"refreshed daily, so a contract added today may need the account "
+                f"reconnected.")
+
     def _place_kotak(self, account_id: str, client: Any, underlying: str,
                      expiry: str, strike: float, opt_type: str, side: str,
                      qty: int, order_type: str, price: float,
@@ -801,12 +865,16 @@ class OrderManager:
         trading_symbol = instruments.token_for("kotak", key)
         if not trading_symbol:
             # Never guess a trading symbol — a wrong one is a wrong instrument.
-            # An empty binding means the scrip master did not load; that used to
-            # be silent, and is now an ERROR line in broker.log at login.
+            #
+            # But an unresolved contract is worth ONE repair attempt before
+            # refusing: the most common cause is an instrument list that failed
+            # to download at login, and asking the user to reconnect made them
+            # fix by hand something the engine can fix by asking again.
+            trading_symbol = self._kotak_reload_symbol(account_id, key)
+        if not trading_symbol:
             return {"ok": False, "broker": "kotak",
-                    "error": f"Kotak trading symbol for {underlying} {expiry} "
-                             f"{int(strike)} {opt_type} is unknown (scrip master not "
-                             f"loaded) — reconnect the Kotak account"}
+                    "error": self._kotak_unknown_symbol(
+                        account_id, underlying, expiry, strike, opt_type)}
         segment = OPT_SEGMENT.get(underlying)
         if segment is None:
             return {"ok": False, "broker": "kotak",

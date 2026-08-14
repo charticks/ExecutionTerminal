@@ -169,6 +169,11 @@ class KotakScripMaster:
         self._tokens: dict[InstrumentKey, str] = {}
         self.row_count = 0
         self.loaded_from: str | None = None
+        # Why the last load produced nothing usable. Carried so the ORDER path
+        # can say what is actually wrong: "scrip master not loaded — reconnect
+        # the account" is not a diagnosis, and it sent users round a loop of
+        # reconnecting against a cause that reconnecting does not change.
+        self.last_error: str | None = None
 
     # ── fetch ─────────────────────────────────────────────────────────────
     def _segment_rows(self, client: Any, segment: str) -> list[dict]:
@@ -176,10 +181,12 @@ class KotakScripMaster:
         try:
             response = client.scrip_master(exchange_segment=segment)
         except Exception as e:
+            self.last_error = f"{segment}: scrip_master() raised {type(e).__name__}: {e}"
             self._log("warn", f"⚠️  Kotak scrip master {segment} failed: {e}")
             return []
         # The SDK reports failure by RETURNING {"Error": ...} rather than raising.
         if isinstance(response, dict):
+            self.last_error = f"{segment}: {response}"
             self._log("warn", f"⚠️  Kotak scrip master {segment}: {response}")
             return []
         # The documented case: a URL to the segment's CSV.
@@ -226,6 +233,7 @@ class KotakScripMaster:
             if not text.strip():
                 raise ValueError("empty body")
         except Exception as e:
+            self.last_error = f"{segment}: CSV download failed — {type(e).__name__}: {e}"
             self._log("warn", f"⚠️  Kotak scrip master {segment} download failed: {e}")
             return self._stale(segment, cache_dir)
 
@@ -274,6 +282,7 @@ class KotakScripMaster:
         seg_map: dict[InstrumentKey, str] = {}
         tokens: dict[InstrumentKey, str] = {}
         fetched = 0
+        self.last_error = None
         for segment in segments:
             rows = self._segment_rows(client, segment)
             if not rows:
@@ -354,11 +363,18 @@ class KotakScripMaster:
         self.row_count = len(seg_map)
         self.loaded_from = f"csv ({fetched} rows across {len(segments)} segments)"
         if not seg_map:
+            if fetched:
+                self.last_error = (f"parsed {fetched} rows but recognised no tradable "
+                                   f"instrument — the scrip master's column names have "
+                                   f"probably changed (see the resolved columns above)")
+            elif not self.last_error:
+                self.last_error = "no rows were returned for any exchange segment"
             self._log("error", f"❌ Kotak scrip master produced no usable instruments from "
-                               f"{fetched} rows — column mapping likely needs adjusting "
-                               f"(see the resolved columns above)")
+                               f"{fetched} rows — {self.last_error}")
             return False
-        self._log("info", f"✅ Kotak scrip master: {len(seg_map)} instruments")
+        self.last_error = None
+        self._log("info", f"✅ Kotak scrip master: {len(seg_map)} instruments "
+                          f"across {len(segments)} segments")
         return True
 
     def bindings(self) -> list[tuple[InstrumentKey, str]]:

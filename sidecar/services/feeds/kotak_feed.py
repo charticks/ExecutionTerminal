@@ -37,6 +37,14 @@ from .kotak_scrip import KotakScripMaster, OPT_SEGMENT, SPOT_SEGMENT
 # Segments worth pulling; anything else is instruments Charticks does not trade.
 SCRIP_SEGMENTS = ["nse_fo", "bse_fo", "mcx_fo", "nse_cm", "bse_cm"]
 
+# Retry policy for the instrument list. Without instruments Kotak can neither
+# stream nor trade, so a transient download failure must not be terminal — but
+# the causes that are NOT transient do not improve with repetition, hence a
+# bound rather than an endless loop.
+SCRIP_RETRY_ATTEMPTS = 5
+SCRIP_RETRY_BASE_S = 5.0
+SCRIP_RETRY_CAP_S = 60.0
+
 # Subscribe depth as well as quotes, so the paper engine gets real top-of-book
 # here exactly as it does from Angel and Dhan. If the depth packet's shape
 # differs from what is parsed below, bid/ask come back None and the engine's
@@ -172,6 +180,8 @@ class KotakFeed(MarketFeed):
 
         self.scrip = KotakScripMaster(self.host.log)
         self._scrip_day: str | None = None
+        self._scrip_lock = threading.Lock()
+        self._scrip_retrying = False
         self._index_keys: set[InstrumentKey] = set()
         self._option_keys: set[InstrumentKey] = set()
         self._sent: set[InstrumentKey] = set()
@@ -213,9 +223,71 @@ class KotakFeed(MarketFeed):
                                   "reconnect the account to restore market data")
             return
         if not self._ensure_scrip():
+            # RETRY, do not give up.
+            #
+            # This used to `return` here, and that single line was enough to
+            # disable Kotak trading for the whole session: `should_run` stayed
+            # False so no watchdog was watching this feed, nothing rescheduled
+            # the load, and — because the account is marked CONNECTED before the
+            # feed starts — every order was still routed to Kotak and rejected
+            # with "scrip master not loaded, reconnect the account". Reconnecting
+            # re-ran the same one-shot attempt, so a transient cause (a slow or
+            # dropped CSV download; these masters are large) produced a permanent
+            # failure the user could not clear.
+            self._schedule_scrip_retry()
             return
         self.should_run = True
         self.ws.start()
+
+    def _schedule_scrip_retry(self) -> None:
+        """Keep trying to load the instrument list, with backoff.
+
+        Bounded: a cause that is not transient (a renamed column, a revoked
+        entitlement) will not fix itself, and hammering a broker API forever is
+        its own problem. What matters is that a download that failed once no
+        longer costs the user the rest of the session.
+        """
+        with self._scrip_lock:
+            if self._scrip_retrying:
+                return
+            self._scrip_retrying = True
+
+        def run() -> None:
+            try:
+                for attempt in range(1, SCRIP_RETRY_ATTEMPTS + 1):
+                    time.sleep(min(SCRIP_RETRY_CAP_S, SCRIP_RETRY_BASE_S * attempt))
+                    if self.client is None or self.needs_reauth:
+                        return
+                    self.host.log("info", f"🔄 Kotak scrip master: retry "
+                                          f"{attempt}/{SCRIP_RETRY_ATTEMPTS}…")
+                    if self._ensure_scrip():
+                        self.host.log("info", "✅ Kotak scrip master recovered — "
+                                              "orders and market data are available")
+                        self.should_run = True
+                        self.ws.start()
+                        return
+                self.host.log("error",
+                              f"❌ Kotak instruments could not be loaded after "
+                              f"{SCRIP_RETRY_ATTEMPTS} attempts "
+                              f"({self.scrip.last_error or 'reason unknown'}). Kotak "
+                              f"orders will keep being rejected until this succeeds — "
+                              f"reconnect the account to try again.")
+            finally:
+                with self._scrip_lock:
+                    self._scrip_retrying = False
+
+        threading.Thread(target=run, daemon=True,
+                         name=f"kotak-scrip-retry-{self.account_id}").start()
+
+    def reload_instruments(self) -> bool:
+        """Force a fresh scrip-master load now.
+
+        Called from the order path when a contract cannot be resolved, so a
+        stale or failed load is repaired by trying to trade rather than by the
+        user working out that they should reconnect the account.
+        """
+        self._scrip_day = None
+        return self._ensure_scrip()
 
     def stop(self) -> None:
         self.should_run = False
