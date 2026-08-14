@@ -22,10 +22,26 @@ type Credentials = Record<string, string>;
 
 contextBridge.exposeInMainWorld("charticks", {
   getBridgeConfig: (): Promise<BridgeConfig> => ipcRenderer.invoke("bridge:config"),
-  onSidecarStatus: (cb: (s: { alive: boolean }) => void) => {
-    const handler = (_e: unknown, s: { alive: boolean }) => cb(s);
+  // Startup profiling. The renderer times its own phases and reports them to the
+  // main process, which owns the one timeline covering all three processes —
+  // Electron, this window, and the Python sidecar. See electron/startup.ts.
+  startupMark: (phase: string, detail?: string): void =>
+    ipcRenderer.send("startup:mark", phase, detail),
+  startupTimeline: (): Promise<{ phase: string; at: number; detail?: string }[]> =>
+    ipcRenderer.invoke("startup:timeline"),
+  onSidecarStatus: (
+    cb: (s: { alive: boolean; fatal?: boolean; reason?: string; detail?: string }) => void,
+  ) => {
+    const handler = (_e: unknown, s: { alive: boolean; fatal?: boolean; reason?: string; detail?: string }) => cb(s);
     ipcRenderer.on("bridge:sidecar-status", handler);
     return () => ipcRenderer.removeListener("bridge:sidecar-status", handler);
+  },
+  // The sidecar binds a port chosen at launch, and a restart picks a new one.
+  // Without this the renderer would go on dialling the old port forever.
+  onBridgeConfigChanged: (cb: () => void) => {
+    const handler = () => cb();
+    ipcRenderer.on("bridge:config-changed", handler);
+    return () => ipcRenderer.removeListener("bridge:config-changed", handler);
   },
   // Encrypted broker credential store (main process is the only place
   // safeStorage works). Secrets never persist in the renderer.

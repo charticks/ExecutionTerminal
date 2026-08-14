@@ -43,7 +43,8 @@ IF SOMETHING GOES WRONG
   Send three things:
     1. A screenshot of the whole window
     2. What you did just before it happened
-    3. The newest folder from:  %APPDATA%\charticks\logs
+    3. Everything in this folder:  %APPDATA%\Charticks\logs
+       (application.log is the most useful single file)
 
   Never share your broker credentials. Crop or blur them out of
   any screenshot first.

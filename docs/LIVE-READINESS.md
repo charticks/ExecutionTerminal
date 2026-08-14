@@ -127,11 +127,19 @@ positions only**: Stop Loss, Target, Trailing SL, Portfolio Trail Profit and
 Square-Off. The arithmetic is shared with the paper engine (`_compute_risk`,
 `_trail_of`, `_steps`) so the two cannot disagree about what a rule means.
 
-Still not ported: **live modify / cancel** of a working order
-(`order_manager.modify_order` / `cancel_order` return "not available yet" in
-live). Automated exits are placed as fresh market orders, so this does not
-affect them, but a resting live limit order still cannot be amended from
-Charticks.
+**Update 2026-08-13** — the engine was rebuilt into a broker-independent,
+restart-safe, self-monitoring subsystem. Four ways it could stop protecting a
+position while still looking normal are closed: management tied to Angel's
+tokens, a RAM-only book destroyed by any restart, an option-chain switch
+unsubscribing open positions, and broker-opened positions rendering
+identically to managed ones. It now also runs a periodic evaluation cycle
+alongside ticks, persists and reconciles the book against the broker's own, and
+raises a persistent alarm whenever it cannot actively protect a position. See
+`docs/LIVE-POSITION-MANAGEMENT.md`.
+
+Live modify / cancel of a working order has since been ported (see
+`docs/ORDER-PIPELINE.md`). Automated exits remain fresh market orders — there is
+still no limit-exit or slippage control.
 
 ---
 
@@ -142,8 +150,8 @@ Charticks.
 | **Installer ships no Python runtime** | `main.ts` spawns bare `python -m uvicorn`, and `resources/sidecar/` contains only `.py` source — no interpreter, no wheels. But `distribution/INSTALL.html` tells testers "the trading engine is built into the installer… if you were sent a setup-tester.bat file, ignore it." On a clean machine the app launches and the sidecar never starts. Either bundle an embedded Python + deps, or correct the docs and keep `setup-tester.bat` in the bundle. |
 | **Sidecar logs land in the install directory** | The SDK's logzero writes to `<cwd>/logs/<date>/app.log`, and the sidecar's cwd is `resources/sidecar`. `START-HERE.txt` tells testers to send `%APPDATA%\charticks\logs`, which does not exist. Point logging at `CHARTICKS_DATA_DIR` (now passed to the sidecar) and fix the doc. |
 | **No exchange holiday calendar** | `market_session.py` documents this: a trading holiday resolves to "open" and the rejection comes from the broker. Acceptable for paper, poor for live — the user gets an opaque SDK error instead of a clear "market closed". |
-| **Paper book is in-memory** | A sidecar restart clears open paper orders and positions. Fine for paper; the same class of state (live order tracking, session risk counters) must be durable before live. |
-| **Position MTM freezes off-window** | `docs/PENDING.md` §C: a position whose token leaves the subscribed chain window stops marking to market. Fix by registering position tokens in the `SubscriptionRegistry`. |
+| **Paper book is in-memory** | A sidecar restart clears open paper orders and positions. Fine for paper. The **live** book is now durable and reconciled against the broker on startup (2026-08-13, `docs/LIVE-POSITION-MANAGEMENT.md` §4). |
+| ~~**Position MTM freezes off-window**~~ | **Fixed 2026-08-13.** It was worse than a frozen P&L: with no ticks the position's stop loss stopped evaluating. Open positions now declare their own contracts to a shared subscription hub, and the management engine evaluates on a 750 ms cycle as well as on ticks. |
 | **Plaintext credential fallback is silent** | `encryptSecrets` falls back to base64 plaintext with `enc: false` when `safeStorage.isEncryptionAvailable()` is false. On Windows DPAPI this should never trigger, but if it does the user is never told their credentials are unencrypted. Warn, or refuse to save. |
 
 ## What is solid

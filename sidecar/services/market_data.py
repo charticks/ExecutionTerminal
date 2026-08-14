@@ -1,12 +1,17 @@
-"""Live market-data adapters: the option chain and the positions poller.
+"""Live market data for the option chain.
 
 The option-chain adapter is broker-agnostic. It asks ``services.instruments``
 which expiries and strikes exist, builds the ATM window as canonical
-``InstrumentKey``s, and hands that set to whichever feed is serving option
-data — which then translates to its own tokens. It previously scanned Angel's
-raw instrument-master rows to do the same job, which meant the chain was empty
-unless Angel specifically was connected; it now works with any supported
-broker, including a Dhan-only session.
+``InstrumentKey``s, and declares that set to the shared subscription hub — which
+sends the union of every source's contracts to whichever feed is serving option
+data. It previously scanned Angel's raw instrument-master rows to do the same
+job, which meant the chain was empty unless Angel specifically was connected; it
+now works with any supported broker, including a Dhan-only session.
+
+It also no longer subscribes the feed DIRECTLY. Doing so replaced the whole
+option subscription, so switching the chain to another index unsubscribed the
+contracts open positions were being managed on and their stops stopped
+evaluating (see services.subscriptions).
 
 Consequently this module no longer drives ``app.option_chain.OptionChainMixin``
 (the legacy Tkinter mixin, headlessly, via stub tk vars). ATM selection lives
@@ -14,17 +19,18 @@ here in ``_STEP`` — the mixin's strike map had no MIDCPNIFTY entry and silentl
 fell back to 50, snapping the ATM to a strike that does not exist on a
 25-point ladder.
 
-The positions adapter polls each connected account's broker position book and
-publishes per-account position_update plus an aggregate pnl_update; its
-per-broker normalisers are necessarily broker-specific. All outputs go through
-the same EventHub / REST contract the renderer already reads.
+The broker position book is no longer polled here: reading it, matching it to
+Charticks' own book and deciding what is managed is one job, and it lives in
+``services.position_reconciler``. This module used to publish its own
+``position_update`` rows keyed by broker token alongside the live book's,
+so the same contract appeared twice and neither row could say whether anything
+was protecting it.
 """
 from __future__ import annotations
 
 import threading
 import time
 import traceback
-from typing import Any
 
 from logzero import logger as _file_log
 
@@ -34,10 +40,17 @@ from services.broker_manager import manager
 from services import expiry as expiry_filter
 from services import market_session
 from services.instruments import InstrumentKey, instruments
+from services.subscriptions import CHAIN, option_subs
 
 _STEP = {"SENSEX": 100, "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
          "MIDCPNIFTY": 25, "BANKEX": 100, "CRUDEOIL": 50}
-_OPT_EXCH_TYPE = {"NFO": 2, "BFO": 4, "MCX": 5}  # Angel SmartWebSocket exchangeType codes
+
+
+def strike_steps() -> dict[str, int]:
+    """The strike ladder per underlying — this module's own source of truth, so
+    the renderer's Roll picker and ATM window step by the same amount the chain
+    is built from rather than a second copy that can drift."""
+    return dict(_STEP)
 
 # Option-subscription watchdog: silence longer than this on a connected feed
 # during market hours means the subscription didn't take, so re-assert it.
@@ -143,8 +156,15 @@ class OptionChainAdapter:
     def resubscribe(self) -> None:
         """Force a full token rebuild + resubscribe on the shared market feed —
         called by the reliability layer after a session re-auth invalidates
-        the old option tokens."""
+        the old option tokens.
+
+        `reassert` as well as the rebuild: after a reconnect the DESIRED set is
+        usually identical to the one already declared, so the hub would treat a
+        re-declaration as a no-op — while the feed, which has forgotten
+        everything, carries nothing at all.
+        """
         self._clear_subscribed()
+        option_subs.reassert()
 
     def select(self, symbol: str | None, count: int | None, expiry: str | None = None) -> None:
         with self._lock:
@@ -157,7 +177,13 @@ class OptionChainAdapter:
                     self._expiries = []
                 self._symbol = new_symbol
             if count:
-                self._count = max(1, min(int(count), 25))
+                # Cap matched to the renderer's "All Strikes" (ALL_RANGE). It was
+                # 25, which is BELOW the explicit "30" option, so picking "All"
+                # after "30" silently narrowed the chain. 50 either side is 202
+                # contracts — comfortably inside every feed's subscription
+                # budget, and the grid now repaints per strike rather than
+                # wholesale, so the width costs nothing to render.
+                self._count = max(1, min(int(count), 50))
             if expiry is not None:
                 self._expiry = expiry or None
             # Force a resubscribe on next rebuild by clearing the token set.
@@ -185,7 +211,33 @@ class OptionChainAdapter:
                 }
             # Force the next rebuild to resubscribe with the new token set.
             self._clear_subscribed()
+        # Answer from the cache NOW, before waking the rebuild.
+        #
+        # The Roll picker opens on this call and used to render "—" against every
+        # strike until a rebuild had resolved the contracts, subscribed them and
+        # a first tick had arrived — a second or more of an empty dialog for
+        # contracts whose price the sidecar very often already had. Roll
+        # candidates sit close to the position, so they are usually inside the
+        # chain window and already ticking. Publishing the cached quotes first
+        # means the dialog is populated the moment it appears, and the
+        # subscription below only has to fill in whatever was genuinely missing.
+        self._publish_watch_from_cache()
         self._wake.set()
+
+    def _publish_watch_from_cache(self) -> None:
+        """Fill the snapshot's `watch` block from quotes already in memory."""
+        watch_keys = self._resolve_watch_keys()
+        with self._lock:
+            self._watch_keys = watch_keys
+            base = dict(self._snapshot)
+        base["watch"] = [
+            {"strike": strike,
+             "ltp": round(ltp, 2) if (ltp := manager.get_option_ltp(key)) is not None else None}
+            for strike, key in sorted(watch_keys.items())
+        ]
+        with self._lock:
+            self._snapshot = base
+        hub.publish(events.option_chain_update(self.snapshot()))
 
     def _resolve_watch_keys(self) -> dict[int, InstrumentKey]:
         """strike -> key for the current watch list. Strikes no connected
@@ -276,13 +328,28 @@ class OptionChainAdapter:
         if key_set and key_set != self._subscribed_keys:
             self._set_subscribed(key_set)
             self._subscribed_at = time.time()
-            # One route for every broker. The serving feed translates these
-            # keys into its own tokens; the chain never sees either.
-            manager.subscribe_option_keys(key_set)
-            # Push immediately (new symbol/expiry/atm + empty rows) so the grid
-            # repaints without waiting for the first option tick.
+            # PUBLISH FIRST, SUBSCRIBE SECOND. Deliberate, and the order matters.
+            #
+            # Declaring the subscription reaches a broker socket and can take
+            # hundreds of milliseconds — for a wide window it is a couple of
+            # hundred contracts across several batched messages. Publishing after
+            # it meant that widening the chain (5 strikes -> All) left the grid
+            # showing the OLD, narrower window for the whole of that round trip,
+            # which reads as the application having frozen.
+            #
+            # Every strike in the new window is known before any of it is
+            # subscribed, and prices we already hold are filled in from the tick
+            # cache, so the grid can paint its final shape immediately and let
+            # the remaining prices arrive as ticks. A strike with no quote yet
+            # renders blank rather than absent.
             self._refresh_snapshot()
             hub.publish(events.option_chain_update(self.snapshot()))
+            # DECLARE, don't subscribe: the hub adds open positions' contracts
+            # and sends the union, so changing index or expiry can never
+            # unsubscribe a contract something else still needs. The serving
+            # feed translates the keys into its own tokens; the chain never
+            # sees either.
+            option_subs.set(CHAIN, key_set)
 
     def _window_keys(self, symbol: str, expiry: str, atm: int,
                      step: int) -> dict[int, dict[str, InstrumentKey]]:
@@ -358,8 +425,11 @@ class OptionChainAdapter:
         hub.publish(events.log_line(
             "warn", f"[option-chain] no option ticks for {now - last_data:.0f}s "
                     f"on {len(self._subscribed_keys)} subscribed contracts — resubscribing"))
-        # Clearing forces the next _rebuild_tokens to resolve and resubscribe.
+        # Clearing forces the next _rebuild_tokens to resolve and re-declare;
+        # the reassert is what actually puts the request back on the wire when
+        # the desired set has not changed.
         self._clear_subscribed()
+        option_subs.reassert()
         self._wake.set()
 
     def _run(self) -> None:
@@ -383,165 +453,4 @@ class OptionChainAdapter:
             self._wake.clear()
 
 
-class PositionsAdapter:
-    """Polls each connected account's broker position book and publishes
-    per-account position_update + an aggregate pnl_update."""
-
-    def __init__(self) -> None:
-        self._known_ids: set[str] = set()
-        threading.Thread(target=self._run, name="positions-adapter", daemon=True).start()
-
-    # ── per-broker position-book normalisers ──────────────────────────────
-    @staticmethod
-    def _f(v: Any, default: float = 0.0) -> float:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return default
-
-    def _angel(self, account_id: str, sess: Any) -> list[dict]:
-        out: list[dict] = []
-        resp = sess.position()
-        data = resp.get("data") if isinstance(resp, dict) else None
-        for p in data or []:
-            qty = int(self._f(p.get("netqty")))
-            if qty == 0:
-                continue
-            avg = self._f(p.get("totalbuyavgprice") or p.get("buyavgprice") or p.get("avgnetprice"))
-            out.append({
-                "id": f"{account_id}:{p.get('symboltoken') or p.get('tradingsymbol')}",
-                "symbol": p.get("tradingsymbol", ""),
-                "side": "BUY" if qty > 0 else "SELL",
-                "qty": abs(qty),
-                "entry": round(avg, 2),
-                "ltp": round(self._f(p.get("ltp")), 2),
-                "pnl": round(self._f(p.get("pnl")), 2),
-                "account": account_id,
-            })
-        return out
-
-    def _dhan(self, account_id: str, sess: Any) -> list[dict]:
-        out: list[dict] = []
-        resp = sess.get_positions()
-        data = resp.get("data") if isinstance(resp, dict) else resp
-        for p in data or []:
-            qty = int(self._f(p.get("netQty")))
-            if qty == 0:
-                continue
-            avg = self._f(p.get("buyAvg") if qty > 0 else p.get("sellAvg"))
-            pnl = self._f(p.get("unrealizedProfit")) + self._f(p.get("realizedProfit"))
-            out.append({
-                "id": f"{account_id}:{p.get('securityId') or p.get('tradingSymbol')}",
-                "symbol": p.get("tradingSymbol", ""),
-                "side": "BUY" if qty > 0 else "SELL",
-                "qty": abs(qty),
-                "entry": round(avg, 2),
-                "ltp": round(self._f(p.get("ltp") or p.get("lastTradedPrice")), 2),
-                "pnl": round(pnl, 2),
-                "account": account_id,
-            })
-        return out
-
-    def _kotak(self, account_id: str, sess: Any) -> list[dict]:
-        out: list[dict] = []
-        resp = sess.positions()
-        data = resp.get("data") if isinstance(resp, dict) else None
-        for p in data or []:
-            qty = int(self._f(p.get("flBuyQty")) - self._f(p.get("flSellQty")))
-            if qty == 0:
-                continue
-            avg = self._f(p.get("buyAmt") if qty > 0 else p.get("sellAmt"))
-            avg = round(avg / abs(qty), 2) if qty else 0.0
-            out.append({
-                "id": f"{account_id}:{p.get('tok') or p.get('trdSym')}",
-                "symbol": p.get("trdSym", ""),
-                "side": "BUY" if qty > 0 else "SELL",
-                "qty": abs(qty),
-                "entry": avg,
-                "ltp": round(self._f(p.get("ltp")), 2),
-                "pnl": round(self._f(p.get("urPnl") or p.get("rlPnl")), 2),
-                "account": account_id,
-            })
-        return out
-
-    def _icici(self, account_id: str, sess: Any) -> list[dict]:
-        """Breeze get_portfolio_positions() → {"Success": [...], "Status": 200}.
-        Row field names are produced server-side (not visible in the SDK), so
-        every read has documented fallbacks — a shape drift shows up as a
-        skipped row, never a wrong number. Needs one live-account validation
-        pass like the Dhan/Kotak normalisers had."""
-        out: list[dict] = []
-        resp = sess.get_portfolio_positions()
-        rows = resp.get("Success") if isinstance(resp, dict) else None
-        for p in rows or []:
-            if not isinstance(p, dict):
-                continue
-            qty = int(self._f(p.get("quantity") or p.get("net_quantity") or p.get("qty")))
-            if qty == 0:
-                continue
-            action = str(p.get("action") or p.get("buy_sell") or "").upper()
-            side = "SELL" if (qty < 0 or action.startswith("S")) else "BUY"
-            avg = self._f(p.get("average_price") or p.get("avg_price") or p.get("price"))
-            ltp = self._f(p.get("ltp") or p.get("last_traded_price") or p.get("current_price"))
-            pnl = self._f(p.get("pnl") or p.get("unrealized_profit") or p.get("profit_and_loss"))
-            symbol = (p.get("stock_code") or p.get("underlying") or "")
-            extra = ""
-            if p.get("strike_price"):
-                right = str(p.get("right") or "").upper()
-                opt = {"CALL": "CE", "PUT": "PE"}.get(right, right)
-                extra = f" {p.get('expiry_date','')} {p.get('strike_price')} {opt}".rstrip()
-            out.append({
-                "id": f"{account_id}:{symbol}{extra}",
-                "symbol": f"{symbol}{extra}",
-                "side": side,
-                "qty": abs(qty),
-                "entry": round(avg, 2),
-                "ltp": round(ltp, 2),
-                "pnl": round(pnl, 2),
-                "account": account_id,
-            })
-        return out
-
-    def _poll_once(self) -> None:
-        sessions = manager.connected_sessions()
-        seen: set[str] = set()
-        net_pnl = 0.0
-        for account_id, broker, sess in sessions:
-            try:
-                if broker == "angel":
-                    rows = self._angel(account_id, sess)
-                elif broker == "dhan":
-                    rows = self._dhan(account_id, sess)
-                elif broker == "kotak":
-                    rows = self._kotak(account_id, sess)
-                elif broker == "icici":
-                    rows = self._icici(account_id, sess)
-                else:
-                    rows = []
-            except Exception as e:
-                classification = manager.session_manager.report_error(account_id, broker, e)
-                if classification != "session_expired":
-                    hub.publish(events.log_line("warn", f"[positions] {broker} poll failed ({classification}): {e}"))
-                continue
-            for r in rows:
-                seen.add(r["id"])
-                net_pnl += r["pnl"]
-                hub.publish(events.position_update(r))
-        # Positions that vanished (closed) since last poll → flag them flat/closed.
-        for gone in self._known_ids - seen:
-            hub.publish(events.position_update({"id": gone, "qty": 0, "pnl": 0, "closed": True}))
-        self._known_ids = seen
-        hub.publish(events.pnl_update(round(net_pnl, 2)))
-
-    def _run(self) -> None:
-        while True:
-            if manager.connected_sessions():
-                try:
-                    self._poll_once()
-                except Exception as e:
-                    hub.publish(events.log_line("warn", f"[positions] {e}"))
-            time.sleep(4.0)
-
-
 option_chain = OptionChainAdapter()
-positions = PositionsAdapter()

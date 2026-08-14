@@ -299,19 +299,37 @@ class IdempotencyGuard:
                     f"the {placement.broker} order book could not be read ({exc}).")
 
         if adapter.tier is Tier.TAG_ECHO:
+            tagged = 0
             for row in rows:
-                if _text(row, adapter.tag_keys) == claim.coid:
+                echoed = _text(row, adapter.tag_keys)
+                if echoed:
+                    tagged += 1
+                if echoed == claim.coid:
                     return (Resolution.FOUND, _text(row, adapter.id_keys),
                             f"client id {claim.coid} echoed in the order book")
             # An empty book is not proof: several SDKs return an empty list for a
-            # read that failed. A book with orders in it, none carrying our tag,
-            # is real evidence.
+            # read that failed.
             if not rows:
                 return (Resolution.UNKNOWN, "",
                         f"the {placement.broker} order book came back empty, which "
                         f"is indistinguishable from a failed read.")
+            # Nor is a book in which NO order carries a client id. This tier rests
+            # on the assumption that the broker echoes the tag we sent under one of
+            # `tag_keys`, and those field names come from SDK source rather than
+            # from an observed live response. If the assumption is wrong — a
+            # renamed field, or a broker that accepts the tag and drops it — then
+            # every row looks untagged, "absent" would be indistinguishable from
+            # "not echoed", and treating it as absence would authorise the exact
+            # duplicate this exists to prevent. So: at least one order has to prove
+            # the echo works before absence means anything.
+            if tagged == 0:
+                return (Resolution.UNKNOWN, "",
+                        f"none of the {len(rows)} orders in the {placement.broker} "
+                        f"order book carry a client id, so Charticks cannot tell "
+                        f"whether this broker echoes one at all.")
             return (Resolution.ABSENT, "",
-                    f"client id {claim.coid} is absent from {len(rows)} orders")
+                    f"client id {claim.coid} is absent from {len(rows)} orders "
+                    f"({tagged} of them carrying a client id)")
 
         return self._match_attributes(adapter, placement, claim, rows)
 

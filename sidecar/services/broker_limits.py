@@ -103,8 +103,18 @@ class BrokerLimitResolver:
         return self._config
 
     def _from_config(self, broker: str, underlying: str) -> OrderLimits | None:
+        """Most specific match wins: this broker's own override, then the
+        exchange-wide freeze quantity, then the do-nothing default.
+
+        The `exchange` scope is what makes a cap apply to EVERY broker. Freeze
+        quantity is a property of the contract, not of who routes the order, but
+        it used to be copied into individual broker blocks — so the two brokers
+        it had not been copied into (Kotak, Dhan) had no cap at all and sent
+        oversized orders whole for the exchange to refuse.
+        """
         cfg = self._load_config()
-        for scope in (cfg.get(broker) or {}, cfg.get("default") or {}):
+        for scope in (cfg.get(broker) or {}, cfg.get("exchange") or {},
+                      cfg.get("default") or {}):
             raw = scope.get(underlying) or scope.get("*")
             if raw:
                 return OrderLimits(

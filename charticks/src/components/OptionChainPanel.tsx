@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OPTION_INDICES, INDEX_BY_ID } from "@/lib/indices";
 import { useMarketStore } from "@/stores/useMarketStore";
 import { useLiveChain } from "@/stores/useLiveChain";
@@ -11,7 +11,7 @@ import { useOrdersStore, type OrderInput } from "@/stores/useOrdersStore";
 import { useUiStore } from "@/stores/useUiStore";
 import { isValidLimitPrice } from "@/lib/orderValidation";
 import { execDelay, applyEntryOffset, orderLimitError } from "@/lib/settingsActions";
-import { marketGate, marketGateSilent } from "@/lib/marketSession";
+import { marketGate } from "@/lib/marketSession";
 import { activeExpiries, resolveActiveExpiry } from "@/lib/expiry";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PartialFillDialog } from "@/components/PartialFillDialog";
@@ -20,10 +20,15 @@ import { DuplicateOrderDialog } from "@/components/DuplicateOrderDialog";
 
 type ChainFilter = "all" | "calls" | "puts";
 const STRIKE_RANGES = [5, 10, 15, 20, 25, 30];
-// "All" maps to the widest strike count the sidecar will subscribe.
-const ALL_RANGE = 25;
+// "All" maps to the widest strike count the sidecar will subscribe. It must be
+// at least the largest explicit option or "All" would show FEWER strikes than
+// "30", which is how it behaved when this was pinned at 25.
+const ALL_RANGE = 50;
 // Abandoned inline Limit editors auto-close after this idle time (no submit).
 const EDITOR_IDLE_MS = 10_000;
+// Stable empty list, so "not this index" does not allocate a fresh array (and
+// re-render the grid) on every pass.
+const EMPTY_STRIKES: number[] = [];
 
 interface EditTarget {
   strike: number;
@@ -157,6 +162,94 @@ function BuySell({
   );
 }
 
+/** Everything a strike row needs that does NOT change tick to tick.
+ *
+ *  Passed as one stable object so `React.memo` on the row has a single reference
+ *  to compare instead of a dozen props, several of which used to be freshly
+ *  allocated closures on every render — which made memoisation impossible and
+ *  meant a tick on one contract re-rendered the entire chain. */
+interface RowContext {
+  showCE: boolean;
+  showPE: boolean;
+  /** strike|optType|side -> lots held. Built once per positions change, so a row
+   *  does an O(1) lookup instead of scanning the position list four times. */
+  held: Map<string, number>;
+  onTrade: (strike: number, optType: "CE" | "PE", side: "BUY" | "SELL", ltp: number) => void;
+  onSubmit: (strike: number, optType: "CE" | "PE", side: "BUY" | "SELL", price: number) => void;
+  onCancel: () => void;
+  onInteract: () => void;
+}
+
+/** One strike.
+ *
+ *  Subscribes to its OWN row in the chain store, so a price change on another
+ *  strike does not re-render it. Combined with the store preserving row identity
+ *  for unchanged strikes, a tick that moves three contracts repaints three rows.
+ */
+const StrikeRow = memo(function StrikeRow({
+  strike,
+  isAtm,
+  atmRef,
+  editing,
+  ctx,
+}: {
+  strike: number;
+  isAtm: boolean;
+  atmRef: React.RefObject<HTMLTableRowElement> | undefined;
+  /** This row's open inline editor, or null. Scoped to the row so opening an
+   *  editor on one strike does not re-render the other hundred. */
+  editing: { optType: "CE" | "PE"; side: "BUY" | "SELL" } | null;
+  ctx: RowContext;
+}) {
+  const row = useLiveChain((s) => s.byStrike[strike]);
+  const ce = row?.ce ?? 0;
+  const pe = row?.pe ?? 0;
+  const editCe = editing?.optType === "CE" ? editing.side : null;
+  const editPe = editing?.optType === "PE" ? editing.side : null;
+  const held = (optType: "CE" | "PE", side: "BUY" | "SELL") =>
+    ctx.held.get(`${strike}|${optType}|${side}`) ?? 0;
+
+  return (
+    <tr ref={atmRef} className={`hoverable ${isAtm ? "atm" : ""}`}>
+      {ctx.showCE && (
+        <td className="ce">
+          <BuySell
+            side="ce"
+            ltp={ce}
+            editing={editCe != null}
+            editSide={editCe}
+            longLots={held("CE", "BUY")}
+            shortLots={held("CE", "SELL")}
+            onBuy={() => ctx.onTrade(strike, "CE", "BUY", ce)}
+            onSell={() => ctx.onTrade(strike, "CE", "SELL", ce)}
+            onSubmit={(price) => ctx.onSubmit(strike, "CE", editCe!, price)}
+            onCancel={ctx.onCancel}
+            onInteract={ctx.onInteract}
+          />
+        </td>
+      )}
+      <td className="strike">{strike}</td>
+      {ctx.showPE && (
+        <td className="pe">
+          <BuySell
+            side="pe"
+            ltp={pe}
+            editing={editPe != null}
+            editSide={editPe}
+            longLots={held("PE", "BUY")}
+            shortLots={held("PE", "SELL")}
+            onBuy={() => ctx.onTrade(strike, "PE", "BUY", pe)}
+            onSell={() => ctx.onTrade(strike, "PE", "SELL", pe)}
+            onSubmit={(price) => ctx.onSubmit(strike, "PE", editPe!, price)}
+            onCancel={ctx.onCancel}
+            onInteract={ctx.onInteract}
+          />
+        </td>
+      )}
+    </tr>
+  );
+});
+
 export function OptionChainPanel() {
   const indexId = useChainStore((s) => s.instrument);
   const setIndexId = useChainStore((s) => s.setInstrument);
@@ -248,21 +341,33 @@ export function OptionChainPanel() {
   const def = INDEX_BY_ID[indexId] ?? INDEX_BY_ID.NIFTY;
   // Live spot from the broker index feed; live chain snapshot from the sidecar.
   const spot = useMarketStore((s) => s.indices[indexId]?.ltp) ?? 0;
-  const snapshot = useLiveChain((s) => s.snapshot);
+  // Header fields are selected INDIVIDUALLY rather than as one `snapshot`
+  // object. The store keeps each stable across a price-only push, so the panel
+  // shell — dropdowns, controls, the ATM scroll effect — no longer re-renders
+  // ten times a second while the chain ticks. Row prices arrive through the
+  // per-strike subscription inside StrikeRow.
+  const chainSymbol = useLiveChain((s) => s.snapshot.symbol);
+  const chainExpiry = useLiveChain((s) => s.snapshot.expiry);
+  const chainExpiries = useLiveChain((s) => s.snapshot.expiries);
+  const chainAtm = useLiveChain((s) => s.snapshot.atm);
+  const strikes = useLiveChain((s) => s.strikes);
   const selectChain = useLiveChain((s) => s.select);
   const feed = useLiveChain((s) => s.feed);
 
-  const onThisIndex = snapshot.symbol === indexId;
-  const rows = onThisIndex ? snapshot.rows : [];
-  const atm = onThisIndex && snapshot.atm ? snapshot.atm : Math.round(spot / def.step) * def.step;
+  const onThisIndex = chainSymbol === indexId;
+  const rowStrikes = useMemo(
+    () => (onThisIndex ? strikes : EMPTY_STRIKES),
+    [onThisIndex, strikes],
+  );
+  const atm = onThisIndex && chainAtm ? chainAtm : Math.round(spot / def.step) * def.step;
   // Charticks' own expiry layer: even if the broker is still listing yesterday's
   // contracts, only active expiries are offered, and the chain falls through to
   // the nearest active one with no user action needed.
   const expiries = useMemo(
-    () => (onThisIndex ? activeExpiries(snapshot.expiries) : []),
-    [onThisIndex, snapshot.expiries],
+    () => (onThisIndex ? activeExpiries(chainExpiries) : []),
+    [onThisIndex, chainExpiries],
   );
-  const expiry = resolveActiveExpiry(onThisIndex ? snapshot.expiry : "", expiries);
+  const expiry = resolveActiveExpiry(onThisIndex ? chainExpiry : "", expiries);
 
   // A pick that expires while the app is open (or a stale one from the broker)
   // is dropped so the selection follows the next active expiry automatically.
@@ -285,16 +390,25 @@ export function OptionChainPanel() {
     atmRef.current?.scrollIntoView({ block: "center" });
   }, [indexId, range, filter]);
 
+  /** strike|optType|side -> lots held, for this index.
+   *
+   *  Built once whenever the position book changes. The row lookup used to be a
+   *  linear scan of every open position, called four times per row — 400 scans
+   *  per repaint on a wide chain, on every tick. */
+  const held = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of openPositions) {
+      if (p.underlying !== indexId) continue;
+      map.set(`${p.strike}|${p.optType}|${p.side}`, p.lots);
+    }
+    return map;
+  }, [openPositions, indexId]);
+
   /** Lots already held on a strike + side. A click on a strike we already hold
    *  is an ADD (the engine averages into the existing position) rather than a
    *  new position, so this drives both the hover hint and the limit check. */
-  const heldLots = (strike: number, optType: "CE" | "PE", side: "BUY" | "SELL"): number => {
-    const p = openPositions.find(
-      (x) => x.underlying === indexId && x.strike === strike
-        && x.optType === optType && x.side === side,
-    );
-    return p?.lots ?? 0;
-  };
+  const heldLots = (strike: number, optType: "CE" | "PE", side: "BUY" | "SELL"): number =>
+    held.get(`${strike}|${optType}|${side}`) ?? 0;
 
   /** Place an order at `price` for the given strike/side. The sidecar engine
    *  (paper) or broker (live) is authoritative — the resulting order/position
@@ -419,8 +533,10 @@ export function OptionChainPanel() {
       const res = await placeOrder(input);
       if (!res.ok) {
         if (res.code === "MARKET_CLOSED") {
-          // Clock drift between renderer and sidecar — show the same dialog.
-          useUiStore.getState().setMarketClosedNotice(true);
+          // Clock drift between renderer and sidecar, or a holiday the renderer
+          // has not fetched yet. Show the ENGINE's message: it names the holiday
+          // where there is one, which the generic text cannot.
+          useUiStore.getState().setMarketClosedNotice(res.error || true);
         } else if (res.code === "DUPLICATE_PENDING") {
           // Sidecar backstop fired (the renderer's book was stale).
           const existing = useOrdersStore.getState().findWorkingOrder({
@@ -456,51 +572,15 @@ export function OptionChainPanel() {
         return;
       }
       registerTrade();
-      // Auto-hedge: after a filled SELL entry, place a protective BUY leg
-      // further OTM (Seller/Hybrid profiles only — Buyer hides the card).
-      if (side === "SELL") void placeHedge(strike, optType);
+      // Auto-hedge is NOT placed here. It is enforced by the sidecar, off the
+      // broker's confirmed fill (services/hedge.py), because this path only
+      // knows the order was accepted for routing: a short rejected at the
+      // exchange used to get a hedge anyway, and a closed window used to get
+      // none at all. The sidecar also places the hedge with no stop of its own,
+      // which this did not — a protective leg with a stop can be taken off and
+      // leave the short naked.
     } finally {
       placingRef.current = false;
-    }
-  };
-
-  /** Place a protective BUY hedge leg `distancePts` further OTM, honouring the
-   *  active profile's hedge config. Retries on failure when enabled. No-op when
-   *  auto-hedge is off. Always MARKET — a protective leg must fill. */
-  const placeHedge = async (mainStrike: number, optType: "CE" | "PE") => {
-    const hedge = useSettingsStore.getState().hedgeConfig();
-    if (!hedge.enabled) return;
-    // Automatic action: fail quietly rather than popping a dialog the user
-    // never asked for. submitOrder already gated the entry leg.
-    if (!marketGateSilent(indexId)) return;
-    const step = def.step || 50;
-    const stepsAway = Math.max(1, Math.round(hedge.distancePts / step));
-    const hedgeStrike = optType === "CE"
-      ? mainStrike + stepsAway * step
-      : mainStrike - stepsAway * step;
-    // A working hedge leg on this contract already covers the position — never
-    // stack a second one (this path is automatic, so no dialog).
-    const existingHedge = useOrdersStore.getState().findWorkingOrder({
-      underlying: indexId, expiry, strike: hedgeStrike, optType, side: "BUY",
-    });
-    if (existingHedge) return;
-    const attempts = hedge.retryFailed ? Math.max(1, hedge.maxRetries) : 1;
-    for (let i = 0; i < attempts; i++) {
-      const res = await placeOrder({
-        underlying: indexId,
-        strike: hedgeStrike,
-        optType,
-        side: "BUY",
-        orderType: "MARKET",
-        lots,
-        qty: lots * lotSize(indexId),
-        price: 0,
-        rule: ruleFor(indexId),
-        expiry,
-        product: useSettingsStore.getState().orderConfig().product,
-        validity: useSettingsStore.getState().orderConfig().validity,
-      });
-      if (res.ok) return;
     }
   };
 
@@ -562,6 +642,34 @@ export function OptionChainPanel() {
 
   const showCE = filter !== "puts";
   const showPE = filter !== "calls";
+
+  // ── stable row wiring ────────────────────────────────────────────────────
+  // `onTrade` and `submitOrder` close over most of this component's state, so
+  // they are rebuilt on every render. Handing them straight to a memoised row
+  // would defeat the memo entirely — every row would see "new props" on every
+  // repaint. The latest versions go into a ref, and the row gets thin wrappers
+  // whose identity never changes.
+  const handlers = useRef({ onTrade, submitOrder, closeEditor, armIdle });
+  handlers.current = { onTrade, submitOrder, closeEditor, armIdle };
+
+  const stableTrade = useCallback(
+    (s: number, o: "CE" | "PE", side: "BUY" | "SELL", ltp: number) =>
+      handlers.current.onTrade(s, o, side, ltp), []);
+  const stableSubmit = useCallback(
+    (s: number, o: "CE" | "PE", side: "BUY" | "SELL", price: number) => {
+      handlers.current.submitOrder(s, o, side, price);
+      handlers.current.closeEditor();
+    }, []);
+  const stableCancel = useCallback(() => handlers.current.closeEditor(), []);
+  const stableInteract = useCallback(() => handlers.current.armIdle(), []);
+
+  const rowContext = useMemo<RowContext>(() => ({
+    showCE, showPE, held,
+    onTrade: stableTrade,
+    onSubmit: stableSubmit,
+    onCancel: stableCancel,
+    onInteract: stableInteract,
+  }), [showCE, showPE, held, stableTrade, stableSubmit, stableCancel, stableInteract]);
 
   // An empty grid used to always read "Connect a broker…", which is wrong (and
   // was actively misleading) whenever the broker WAS connected but the market
@@ -697,60 +805,25 @@ export function OptionChainPanel() {
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && (
+            {rowStrikes.length === 0 && (
               <tr>
                 <td className="oc-waiting" colSpan={3}>
                   {emptyReason}
                 </td>
               </tr>
             )}
-            {rows.map((row) => {
-              const k = row.strike;
-              const ce = row.ce ?? 0;
-              const pe = row.pe ?? 0;
-              const isAtm = k === atm;
-              const editCe = editing && editing.strike === k && editing.optType === "CE" ? editing.side : null;
-              const editPe = editing && editing.strike === k && editing.optType === "PE" ? editing.side : null;
-              return (
-                <tr key={k} ref={isAtm ? atmRef : undefined} className={`hoverable ${isAtm ? "atm" : ""}`}>
-                  {showCE && (
-                    <td className="ce">
-                      <BuySell
-                        side="ce"
-                        ltp={ce}
-                        editing={editCe != null}
-                        editSide={editCe}
-                        longLots={heldLots(k, "CE", "BUY")}
-                        shortLots={heldLots(k, "CE", "SELL")}
-                        onBuy={() => onTrade(k, "CE", "BUY", ce)}
-                        onSell={() => onTrade(k, "CE", "SELL", ce)}
-                        onSubmit={(price) => { submitOrder(k, "CE", editCe!, price); closeEditor(); }}
-                        onCancel={closeEditor}
-                        onInteract={armIdle}
-                      />
-                    </td>
-                  )}
-                  <td className="strike">{k}</td>
-                  {showPE && (
-                    <td className="pe">
-                      <BuySell
-                        side="pe"
-                        ltp={pe}
-                        editing={editPe != null}
-                        editSide={editPe}
-                        longLots={heldLots(k, "PE", "BUY")}
-                        shortLots={heldLots(k, "PE", "SELL")}
-                        onBuy={() => onTrade(k, "PE", "BUY", pe)}
-                        onSell={() => onTrade(k, "PE", "SELL", pe)}
-                        onSubmit={(price) => { submitOrder(k, "PE", editPe!, price); closeEditor(); }}
-                        onCancel={closeEditor}
-                        onInteract={armIdle}
-                      />
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
+            {rowStrikes.map((k) => (
+              <StrikeRow
+                key={k}
+                strike={k}
+                isAtm={k === atm}
+                atmRef={k === atm ? atmRef : undefined}
+                editing={editing && editing.strike === k
+                  ? { optType: editing.optType, side: editing.side }
+                  : null}
+                ctx={rowContext}
+              />
+            ))}
           </tbody>
         </table>
       </div>

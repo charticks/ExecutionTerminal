@@ -261,6 +261,46 @@ class BrokerManager:
         return {"ok": True}
 
     # ── market-data feed lifecycle ────────────────────────────────────────
+    def _start_market_data_async(self, account_id: str, broker: str, session: Any,
+                                 session_tokens: dict) -> None:
+        """Load the instrument master and bring the feed up, off the connect path.
+
+        Reference data is not authentication. Holding a broker connect open
+        while ~40 MB of instrument master downloads made every first login of
+        the day look like a slow login, and with auto-connect enabled it was the
+        single longest phase of application startup.
+
+        The user-visible state is honest throughout: the account is genuinely
+        connected (its REST session works, orders can be placed as soon as the
+        master resolves), and /market-feed reports the data plane separately —
+        which is exactly the distinction that layer exists to make.
+        """
+        def run() -> None:
+            try:
+                started = time.time()
+                self._load_master(session)
+                self._log("info", f"[broker] instrument master ready in "
+                                  f"{time.time() - started:.1f}s")
+            except Exception as exc:
+                # A failed master is not a failed login. The account stays
+                # connected; the chain simply has nothing to resolve until a
+                # retry succeeds, and says so.
+                self._log("error", f"❌ Instrument master could not be loaded ({exc}) "
+                                   f"— the option chain will stay empty until it is. "
+                                   f"Reconnect the account to retry.")
+                diagnostics.exception("broker", "Instrument master load failed",
+                                      exc_info=exc, account=diagnostics.mask_account(account_id))
+                return
+            try:
+                self._start_feed(account_id, broker, session_tokens=session_tokens)
+            except Exception as exc:
+                diagnostics.exception("broker", "Market feed start failed",
+                                      exc_info=exc, broker=broker,
+                                      account=diagnostics.mask_account(account_id))
+
+        threading.Thread(target=run, daemon=True,
+                         name=f"market-data-{account_id}").start()
+
     def _start_feed(self, account_id: str, broker: str,
                     session_tokens: dict | None = None) -> None:
         """Bring up (or reconcile) this account's market feed after a successful
@@ -353,8 +393,18 @@ class BrokerManager:
                 # layer's _on_session_recovered once this returns ok).
                 if self._market_account in (None, account_id):
                     self._market_account = account_id
-                    self._load_master(smart)
-                    self._start_feed(account_id, "angel", session_tokens={
+                    # The instrument master is ~40 MB and, on the first login of
+                    # the day, has to be downloaded. Doing that inline held the
+                    # whole connect open for as long as the download took, so an
+                    # account that had authenticated in under a second sat at
+                    # "connecting" for another ten to thirty — and with
+                    # auto-connect on, that was the app's entire startup.
+                    #
+                    # Authentication is done and the session is usable, so the
+                    # connect returns now. The master and the feed come up on a
+                    # worker; the option chain retries on its own cycle and
+                    # populates the moment they land.
+                    self._start_market_data_async(account_id, "angel", smart, {
                         "jwt_token": data["data"]["jwtToken"].replace("Bearer ", ""),
                         "feed_token": data["data"]["feedToken"],
                         "client_code": data["data"]["clientcode"],
@@ -673,6 +723,41 @@ class BrokerManager:
                 "tradingsymbol": s.get("symbol", ""),
             }
         return None
+
+    def contract_specs(self) -> dict[str, dict]:
+        """Lot size + tick size per underlying, read from the instrument master.
+
+        The renderer sizes every order as `lots x lot size` and used to take that
+        number from a hard-coded table it shipped with. Exchanges revise lot
+        sizes; when one drifted, the quantity the renderer sent stopped matching
+        the contract and `rule_lot_size` rejected every order for that index —
+        correctly, but with no way to fix it short of a new build. Serving the
+        master's own figure removes the possibility.
+
+        Empty until a master is loaded, which is honest: the renderer then keeps
+        using its fallback, and so does the lot-size rule (which stands down when
+        it does not know the real size), so the two cannot disagree.
+        """
+        specs: dict[str, dict] = {}
+        for s in self.instrument_master:
+            if "OPT" not in (s.get("instrumenttype") or ""):
+                continue
+            name = (s.get("name") or "").upper()
+            if not name or name in specs or self._OPT_EXCH.get(name) is None:
+                continue
+            if s.get("exch_seg", "") != self._OPT_EXCH[name]:
+                continue
+            try:
+                lot = int(float(s.get("lotsize") or 0))
+                tick = float(s.get("tick_size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if lot <= 0:
+                continue
+            specs[name] = {"lotSize": lot,
+                           # Angel publishes tick size in paise (5 = ₹0.05).
+                           "tickSize": round(tick / 100.0, 4) if tick > 0 else None}
+        return specs
 
     def resolve_option(self, underlying: str, expiry: str, strike: float,
                        opt_type: str) -> tuple[str, str | None, str]:

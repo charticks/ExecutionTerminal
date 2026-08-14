@@ -44,9 +44,18 @@ export const STYLE_LABEL: Record<TradingStyle, string> = {
   HYBRID: "Hybrid",
 };
 
-/** Instruments configurable on the Settings page. FINNIFTY / MIDCPNIFTY are
- *  intentionally excluded here (they remain tradeable elsewhere). */
-export const SETTINGS_INSTRUMENTS = ["NIFTY", "BANKNIFTY", "SENSEX"] as const;
+/** Instruments configurable on the Settings page.
+ *
+ *  Every instrument the Option Chain can trade appears here. It used to list
+ *  only NIFTY / BANKNIFTY / SENSEX, and anything else — FINNIFTY, MIDCPNIFTY,
+ *  BANKEX, and CRUDEOIL in particular — silently inherited
+ *  FALLBACK_INSTRUMENT_DEFAULT. That is a 20-point stop, which is a reasonable
+ *  NIFTY option stop and a meaningless one on a Crude option, with no way to
+ *  change it: the trade opened with a stop the user had never chosen and could
+ *  not see. */
+export const SETTINGS_INSTRUMENTS = [
+  "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "CRUDEOIL",
+] as const;
 export const PARTIAL_EXIT_CHOICES = [25, 50, 75, 100] as const;
 
 /** Per-instrument default values. Both Trail SL modes keep their own pair of
@@ -159,7 +168,14 @@ const KEY = "ck.settings";
 const SEED_INSTRUMENTS: Record<string, InstrumentDefault> = {
   NIFTY: { sl: 20, target: 40, trailAfter: 10, trailStep: 10, startTrail: 5000, profitStep: 1000 },
   BANKNIFTY: { sl: 40, target: 80, trailAfter: 20, trailStep: 10, startTrail: 5000, profitStep: 1000 },
+  FINNIFTY: { sl: 20, target: 40, trailAfter: 10, trailStep: 10, startTrail: 5000, profitStep: 1000 },
+  MIDCPNIFTY: { sl: 15, target: 30, trailAfter: 8, trailStep: 8, startTrail: 5000, profitStep: 1000 },
   SENSEX: { sl: 30, target: 60, trailAfter: 40, trailStep: 20, startTrail: 5000, profitStep: 1000 },
+  BANKEX: { sl: 40, target: 80, trailAfter: 20, trailStep: 10, startTrail: 5000, profitStep: 1000 },
+  // Crude premiums are an order of magnitude larger than an index option's, so
+  // a 20-point stop would be inside the spread. These are a starting point, not
+  // a recommendation — the point is that they are visible and editable.
+  CRUDEOIL: { sl: 60, target: 120, trailAfter: 30, trailStep: 20, startTrail: 5000, profitStep: 1000 },
 };
 
 /** Fallback used for an instrument with no configured row (e.g. FINNIFTY). */

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FlashNumber } from "@/components/FlashNumber";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { InfoDialog } from "@/components/InfoDialog";
 import { SessionLimitsBar } from "@/components/SessionLimitsBar";
 import { RollDialog, type RollDirection } from "@/components/RollDialog";
 import { Icon } from "@/components/Icon";
@@ -24,6 +25,8 @@ import {
   parseOptionSymbol,
   type Position as LivePosition,
 } from "@/stores/useMarketStore";
+import type { MonitorState } from "@/bridge/events";
+import { bridge } from "@/bridge/client";
 import { useTradingModeStore } from "@/stores/useTradingModeStore";
 import { INDEX_BY_ID } from "@/lib/indices";
 import { money } from "@/lib/format";
@@ -573,31 +576,150 @@ function WorkingOrderRow({ o, showRoll }: { o: Order; showRoll: boolean }) {
   );
 }
 
-/** Live broker-position row (read-only). The broker position book gives
- *  symbol/side/qty/entry/ltp/pnl; interactive order actions (adjust/close/roll)
- *  require the order engine and are disabled here until that is wired. */
+/** How each monitoring state is shown. The rule this table encodes: a position
+ *  Charticks is NOT actively protecting must never render like one it is.
+ *  `alarm` positions get the loud treatment and are counted in the banner. */
+const MONITOR_BADGE: Record<
+  MonitorState,
+  { label: string; kind: "ok" | "warn" | "alarm" | "info" }
+> = {
+  protected: { label: "🟢 Managed", kind: "ok" },
+  no_rule: { label: "🟡 No SL / Target", kind: "info" },
+  exiting: { label: "⏳ Exiting", kind: "info" },
+  feed_lost: { label: "⚠ Feed Lost — Automation Paused", kind: "alarm" },
+  paused: { label: "⚠ Monitoring Paused", kind: "alarm" },
+  restoring: { label: "⏳ Confirming with broker", kind: "warn" },
+  unmanaged: { label: "🔴 Not Protected", kind: "alarm" },
+};
+
+/** Plain-English name for why a position is being exited, for the row badge. */
+const EXIT_LABEL: Record<string, string> = {
+  "stop-loss": "Stop Loss",
+  target: "Target",
+  "portfolio-trail": "Portfolio Trail",
+  "square-off": "Square Off",
+  "manual-exit": "Closing",
+  roll: "Rolling",
+};
+
+function MonitorBadge({ p }: { p: LivePosition }) {
+  // An exit in flight outranks every other state. It is the most specific thing
+  // true about the position, it is what the user just did, and it is the reason
+  // the row's controls are locked — so it must be what the row says.
+  if ((p.exitPendingQty ?? 0) > 0) {
+    const why = EXIT_LABEL[p.exitReason ?? ""] ?? "Closing";
+    const partial = (p.exitPendingQty ?? 0) < p.qty;
+    return (
+      <span
+        className="mon-badge pending"
+        title={`${why} — ${p.exitPendingQty} of ${p.qty} qty is at the broker. `
+          + `This row will close, or return to normal if the exit is refused.`}
+      >
+        ⏳ Exit Pending{partial ? ` · ${p.exitPendingQty} qty` : ""} · {why}
+      </span>
+    );
+  }
+  // No state yet (an event from an older sidecar) is treated as unmanaged
+  // rather than assumed safe — the whole point is that silence never reads as
+  // "protected".
+  const state: MonitorState = p.monitorState ?? (p.managed ? "restoring" : "unmanaged");
+  const badge = MONITOR_BADGE[state] ?? MONITOR_BADGE.unmanaged;
+  return (
+    <span className={`mon-badge ${badge.kind}`} title={p.monitorDetail || badge.label}>
+      {badge.label}
+    </span>
+  );
+}
+
+/** Which side of a hedge relationship this row is on.
+ *
+ *  A protective leg is not an independent trade and must not read like one: the
+ *  grid says what it protects, so a long sitting next to a short is obviously
+ *  one strategy rather than two unrelated positions. The short says it is
+ *  covered for the same reason. */
+function HedgeTag({ p }: { p: LivePosition }) {
+  const positions = useMarketStore((s) => s.positions);
+  const name = (id: string) => positions[id]?.symbol ?? id.split("|").slice(2).join(" ");
+  if (p.hedgeFor && p.hedgeFor.length > 0) {
+    const covers = p.hedgeFor.map(name).join(", ");
+    return (
+      <span className="hedge-tag child" title={`Protective hedge for ${covers}`}>
+        🛡 Hedge · {covers}
+      </span>
+    );
+  }
+  if (p.hedgedBy) {
+    return (
+      <span className="hedge-tag parent" title={`Hedged by ${name(p.hedgedBy)}`}>
+        🛡 Hedged
+      </span>
+    );
+  }
+  return null;
+}
+
+/** Live position row. Charticks-managed positions carry their SL / Target and
+ *  the same partial-exit controls as paper; positions opened elsewhere are
+ *  clearly marked and offer Manage / Ignore instead. */
 function LivePositionRow({
   p,
   showRoll,
   onRoll,
+  onAdopt,
 }: {
   p: LivePosition;
   showRoll: boolean;
   onRoll: (p: LivePosition, dir: RollDirection) => void;
+  onAdopt: (p: LivePosition) => void;
 }) {
-  // Roll applies only to option legs (a parseable strike/CE-PE symbol).
+  const setRisk = usePositionsStore((s) => s.setRisk);
+  const closePosition = usePositionsStore((s) => s.closePosition);
+  const partialExits = useSettingsStore((s) => s.active().order.partialExits);
+  const partialFractions = (partialExits.length ? partialExits : [100])
+    .slice()
+    .sort((a, b) => a - b)
+    .map((v) => v / 100);
+  // Prefer the structured contract the sidecar sends; fall back to parsing the
+  // symbol for foreign legs, which carry no canonical identity.
   const parsed = parseOptionSymbol(p.symbol);
-  const rollable = parsed != null;
+  const underlying = p.underlying ?? parsed?.underlying ?? "";
+  const managed = p.managed === true;
+  // An exit is at the broker. Everything that would change this position is
+  // locked until it resolves: a roll, an SL edit or a second partial exit sent
+  // now would be racing an order whose outcome nobody knows yet, and would be
+  // sized against a quantity that is about to change.
+  const exiting = (p.exitPendingQty ?? 0) > 0;
+  const rollable = managed && !exiting && (p.optType != null || parsed != null);
+
   return (
-    <tr>
+    <tr className={`${managed ? "" : "unmanaged-row"} ${exiting ? "exiting-row" : ""}`}>
       <td className="c-inst">
         <div className="sym">
           {p.symbol}
-          <ExpiryTag expiry={parsed?.expiry} />
+          <ExpiryTag expiry={p.expiry ?? parsed?.expiry} />
+          <MonitorBadge p={p} />
+          <HedgeTag p={p} />
         </div>
         <div className="sub">
           <span className={`dir ${p.side === "BUY" ? "l" : "s"}`}>{p.side === "BUY" ? "L" : "S"}</span>
           {p.qty} Qty
+          {managed && (
+            <>
+              {" "}
+              <EditableRisk
+                label="SL"
+                value={p.sl ?? undefined}
+                disabled={exiting}
+                onSave={(n) => setRisk(p.id, { sl: n })}
+              />
+              <EditableRisk
+                label="Tgt"
+                value={p.target ?? undefined}
+                disabled={exiting}
+                onSave={(n) => setRisk(p.id, { target: n })}
+              />
+            </>
+          )}
         </div>
       </td>
       <td className="c-num num">{p.entry.toFixed(2)}</td>
@@ -609,7 +731,40 @@ function LivePositionRow({
         <FlashNumber value={p.pnl} format={money} className={`pnl-cell ${p.pnl >= 0 ? "up" : "down"}`} />
       </td>
       <td className="c-adj" />
-      <td className="c-close" />
+      <td className="c-close">
+        {exiting ? (
+          // No buttons and no second row: the exit already sent IS this
+          // position's current state, and it is shown in the badge above.
+          <span className="close-pending" title={p.exitReason ?? "exit in progress"}>
+            Exit sent
+          </span>
+        ) : managed ? (
+          <div className="close-cell">
+            {partialFractions.map((f) => (
+              <button
+                key={f}
+                className="closeb"
+                title={`Exit ${f * 100}% of position at market`}
+                onClick={async () => {
+                  if (!marketGate(underlying)) return;
+                  await execDelay();
+                  closePosition(p.id, f);
+                }}
+              >
+                {f * 100}%
+              </button>
+            ))}
+          </div>
+        ) : (
+          <button
+            className="adoptb"
+            title="Apply this instrument's Stop Loss / Target / Trail to this position and manage it from now on"
+            onClick={() => onAdopt(p)}
+          >
+            Manage
+          </button>
+        )}
+      </td>
       {showRoll && (
         <td className="c-roll">
           {rollable && (
@@ -624,28 +779,122 @@ function LivePositionRow({
   );
 }
 
+/** A hedge whose last protected short has closed.
+ *
+ *  Asked rather than decided: closing it is an exit the user never requested,
+ *  keeping it silently leaves a long position they never chose to hold on its
+ *  own. Both are legitimate — which one is right depends on what they were
+ *  trading, which Charticks cannot know. The hedge stays exactly as it is,
+ *  fully managed, until they answer.
+ */
+function OrphanedHedgeDialog() {
+  const queue = useMarketStore((s) => s.orphanedHedges);
+  const dismiss = useMarketStore((s) => s.dismissOrphanedHedge);
+  const [busy, setBusy] = useState(false);
+  const hedge = queue[0];
+  if (!hedge) return null;
+
+  const decide = async (action: "close" | "keep") => {
+    setBusy(true);
+    try {
+      await bridge.post("/positions/hedge-decision", {
+        hedgeId: hedge.hedgeId, action,
+      }).catch(() => {});
+      dismiss(hedge.hedgeId);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Hedge still open">
+        <h4>The hedge for this trade is still open</h4>
+        <p>
+          <b>{hedge.symbol}</b> was opened automatically to protect a short
+          position that has now closed. Nothing else is relying on it, so it is
+          currently a long position on its own.
+        </p>
+        <p className="dim">
+          {hedge.qty} qty · running P&amp;L{" "}
+          <b className={hedge.pnl >= 0 ? "up" : "down"}>{money(hedge.pnl)}</b>
+        </p>
+        <p className="dim">
+          Closing it exits at market now. Keeping it leaves it as an ordinary
+          position of your own, managed like any other — Charticks will stop
+          treating it as somebody else's protection.
+        </p>
+        <div className="modal-actions">
+          <button className="btn-ghost" disabled={busy} onClick={() => void decide("keep")}>
+            Keep Hedge Open
+          </button>
+          <button className="btn-primary" disabled={busy} onClick={() => void decide("close")}>
+            Close Hedge
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Persistent banner listing every position Charticks currently cannot protect.
+ *  Deliberately not dismissible and not a toast: the danger lasts exactly as
+ *  long as the condition, so the warning does too. */
+function MonitorAlarmBanner() {
+  const alarm = useMarketStore((s) => s.monitorAlarm);
+  const positions = useMarketStore((s) => s.positions);
+  if (alarm.length === 0) return null;
+  const label = (id: string) => positions[id]?.symbol ?? id;
+  return (
+    <div className="mon-alarm" role="alert">
+      <div className="mon-alarm-head">
+        ⚠ {alarm.length} position{alarm.length === 1 ? "" : "s"} not protected
+      </div>
+      <ul>
+        {alarm.map((a) => (
+          <li key={a.id}>
+            <b>{label(a.id)}</b> — {a.detail || MONITOR_BADGE[a.state]?.label || a.state}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** Positions panel backed by the live broker position book (per-account, with
  *  aggregate P&L) whenever a broker is connected. */
 function LivePositionGridPanel() {
   const positionsMap = useMarketStore((s) => s.positions);
   const netPnl = useMarketStore((s) => s.netPnl);
-  const rollLivePosition = useMarketStore((s) => s.rollPosition);
   const showRoll = useGridPrefsStore((s) => s.cols.roll);
+  const ruleFor = useSettingsStore((s) => s.ruleFor);
   const positions = Object.values(positionsMap).filter((p) => p.qty > 0);
   const colCount = 7 + (showRoll ? 1 : 0);
   const [rolling, setRolling] = useState<{ position: LivePosition; dir: RollDirection } | null>(null);
+  // Positions opened outside Charticks are never adopted silently — the user
+  // is shown exactly which stop and target would be applied, and confirms it.
+  const [adopting, setAdopting] = useState<LivePosition | null>(null);
+  const [squaringOff, setSquaringOff] = useState(false);
+  const [rollError, setRollError] = useState("");
+  const unprotected = positions.filter((p) => p.managed !== true).length;
 
   // Adapt a live position into the Roll Decider's target shape (same logic the
   // paper panel uses); non-option legs are filtered out before this runs. The
   // parsed expiry keeps the roll — and its quotes — on the same contract series.
   const rollTarget = (() => {
     if (!rolling) return null;
-    const parsed = parseOptionSymbol(rolling.position.symbol);
+    const p = rolling.position;
+    // The structured contract the sidecar sends is authoritative; parsing the
+    // display symbol is only the fallback for a leg that carries none.
+    const parsed =
+      p.underlying && p.optType && p.strike != null
+        ? { underlying: p.underlying, expiry: p.expiry ?? "", strike: p.strike, optType: p.optType }
+        : parseOptionSymbol(p.symbol);
     if (!parsed) return null;
     const size = lotSize(parsed.underlying);
     return {
       ...parsed,
-      lots: Math.max(1, Math.round(rolling.position.qty / size)),
+      lots: p.lots && p.lots > 0 ? p.lots : Math.max(1, Math.round(p.qty / size)),
     };
   })();
 
@@ -664,10 +913,25 @@ function LivePositionGridPanel() {
         <span className="live-count">
           Live : <b className="num">{positions.length}</b>
         </span>
+        {unprotected > 0 && (
+          <span className="unprotected-count" title="Positions Charticks is not managing">
+            Unprotected : <b className="num">{unprotected}</b>
+          </span>
+        )}
         <ColumnMenu />
+        <button
+          className="sq-off"
+          disabled={positions.length === 0}
+          onClick={() => setSquaringOff(true)}
+          title="Square off every open position at market"
+        >
+          Square Off All
+        </button>
       </div>
 
       <SessionLimitsBar rollingPnl={netPnl} />
+      <MonitorAlarmBanner />
+      <OrphanedHedgeDialog />
 
       <div className="pbody">
         <table className="pos-grid">
@@ -700,6 +964,7 @@ function LivePositionGridPanel() {
                 p={p}
                 showRoll={showRoll}
                 onRoll={(position, dir) => setRolling({ position, dir })}
+                onAdopt={setAdopting}
               />
             ))}
             {positions.length === 0 && (
@@ -715,13 +980,84 @@ function LivePositionGridPanel() {
         <RollDialog
           position={rollTarget}
           direction={rolling.dir}
-          onRoll={(newStrike, premium) => {
+          // A live roll is two real broker orders, sequenced by the sidecar:
+          // the current leg is closed and the new one is opened only once the
+          // broker confirms that close. Nothing is written to the local grid —
+          // the rolled position appears when the broker reports it, exactly
+          // like every other live position.
+          onRoll={async (newStrike) => {
             if (!marketGate(rollTarget.underlying)) return;
-            rollLivePosition(rolling.position.id, newStrike, premium);
+            const res = await bridge
+              .post<{ ok: boolean; error?: string }>("/positions/roll", {
+                id: rolling.position.id,
+                newStrike,
+              })
+              .catch(() => ({ ok: false, error: "The roll could not be sent." }));
+            if (!res.ok) setRollError(res.error ?? "The roll was not accepted.");
           }}
           onClose={() => setRolling(null)}
         />
       )}
+
+      <InfoDialog
+        open={rollError !== ""}
+        title="Roll not sent"
+        message={rollError}
+        onClose={() => setRollError("")}
+      />
+
+      <ConfirmDialog
+        open={adopting != null}
+        title="Manage this position with Charticks?"
+        message={
+          adopting
+            ? `${adopting.symbol} was not opened by Charticks, so nothing is ` +
+              `protecting it. Managing it applies your ` +
+              `${adopting.underlying ?? "instrument"} defaults — Stop Loss, ` +
+              `Target and Trail SL — against the broker's entry price of ` +
+              `₹${adopting.entry.toFixed(2)}, and Charticks will exit it ` +
+              `automatically when they are hit.`
+            : ""
+        }
+        confirmLabel="Manage"
+        onConfirm={async () => {
+          const target = adopting;
+          setAdopting(null);
+          if (!target) return;
+          // The instrument's own defaults, exactly as a new trade on it would
+          // capture them. Falls back to NIFTY's when the leg has no canonical
+          // underlying (a foreign row the sidecar could not parse).
+          await bridge
+            .post("/positions/adopt", {
+              id: target.id,
+              rule: ruleFor(target.underlying ?? "NIFTY"),
+            })
+            .catch(() => {});
+        }}
+        onCancel={() => setAdopting(null)}
+      />
+
+      <ConfirmDialog
+        open={squaringOff}
+        danger
+        title="Square off all positions?"
+        message={
+          `This closes all ${positions.length} open position` +
+          `${positions.length === 1 ? "" : "s"} at market — including any ` +
+          `Charticks is not managing. This cannot be undone.`
+        }
+        confirmLabel="Square Off All"
+        onConfirm={async () => {
+          setSquaringOff(false);
+          if (!positions.some((p) => marketGateSilent(p.underlying ?? ""))) {
+            marketGate();
+            return;
+          }
+          await execDelay();
+          await bridge.post("/positions/square-off").catch(() => {});
+        }}
+        onCancel={() => setSquaringOff(false)}
+      />
     </section>
   );
 }

@@ -39,6 +39,26 @@ export interface IndexQuote {
   ts: number;
 }
 
+/** Whether a position is actually being protected right now. Mirror of the
+ *  vocabulary in sidecar/services/live_book.py — keep the two in step.
+ *
+ *  Only "protected" and "no_rule" mean nothing is wrong: in "no_rule" the user
+ *  chose to trade without a stop. Every other value means automation is NOT
+ *  acting on this position, and the UI must say so rather than drawing a normal
+ *  row. */
+export type MonitorState =
+  | "protected"
+  | "no_rule"
+  | "exiting"
+  | "feed_lost"
+  | "paused"
+  | "restoring"
+  | "unmanaged";
+
+/** Where a position came from: opened by Charticks, opened elsewhere and
+ *  adopted by the user, or opened elsewhere and not managed. */
+export type PositionSource = "charticks" | "adopted" | "external";
+
 export interface PositionUpdate {
   type: "position_update";
   id: string;
@@ -48,9 +68,66 @@ export interface PositionUpdate {
   entry: number;
   ltp: number;
   pnl: number;
-  sl?: number;
-  target?: number;
+  sl?: number | null;
+  target?: number | null;
   tsl?: number;
+  /** Structured contract, so the renderer never has to parse `symbol` back
+   *  apart. Absent on foreign legs (equity/futures rows) which have no
+   *  canonical option identity. */
+  underlying?: string;
+  expiry?: string;
+  strike?: number;
+  optType?: "CE" | "PE";
+  lots?: number;
+  /** True when Charticks is enforcing this position's SL / Target / Trail. */
+  managed?: boolean;
+  monitorState?: MonitorState;
+  /** Plain-language reason, shown in the row's tooltip and the alarm banner. */
+  monitorDetail?: string;
+  source?: PositionSource;
+  account?: string | null;
+  broker?: string | null;
+  /** Quantity of this position currently being exited at the broker, and why.
+   *
+   *  A square-off is an ACTION ON THE POSITION, not a second position: the grid
+   *  keeps one row from entry to close and moves it through its states. These
+   *  are what drive the "Exit Pending" badge and the locking of the row's
+   *  controls, instead of a separate pending-order row appearing above it. */
+  exitPendingQty?: number;
+  exitReason?: string | null;
+  /** The protective hedge covering this (short) position, if Charticks opened
+   *  one — the id of the hedge's own row. */
+  hedgedBy?: string | null;
+  /** The short position ids this leg is a HEDGE for. Present only on a hedge,
+   *  and more than one when the same hedge covers several shorts. A hedge is
+   *  never drawn as an independent trade. */
+  hedgeFor?: string[] | null;
+  /** Set when the position is gone (qty 0) — the row should disappear. */
+  closed?: boolean;
+}
+
+/** The last short a protective hedge was covering has closed, leaving the hedge
+ *  on its own. Charticks neither closes nor keeps it by itself — both are
+ *  decisions the user has to make — so it asks. */
+export interface HedgeOrphanedEvent {
+  type: "hedge_orphaned";
+  hedgeId: string;
+  symbol: string;
+  qty: number;
+  lots: number;
+  parent: string;
+  pnl: number;
+  ts: number;
+}
+
+/** Raised while Charticks cannot actively protect one or more positions it is
+ *  displaying. Stays active until monitoring resumes, so it is rendered as a
+ *  persistent banner rather than a toast. */
+export interface MonitorAlarmEvent {
+  type: "monitor_alarm";
+  active: boolean;
+  positions: { id: string; state: MonitorState; detail: string }[];
+  ts: number;
 }
 
 /** Canonical live-order lifecycle, mirrored from
@@ -214,6 +291,8 @@ export type BridgeEvent =
   | CandleCloseEvent
   | IndexQuote
   | PositionUpdate
+  | MonitorAlarmEvent
+  | HedgeOrphanedEvent
   | OrderUpdate
   | PnlUpdate
   | RiskEvent

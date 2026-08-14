@@ -27,14 +27,13 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
 
 import diagnostics
 from bridge import events
 from bridge.hub import hub
 from services import expiry as expiry_filter
 from services.broker_manager import manager
-from services.instruments import instruments
+from services.instruments import InstrumentKey
 
 # NSE/BSE index-option tick size (rupees). Prices must sit on this grid.
 TICK_SIZE = 0.05
@@ -120,13 +119,20 @@ class PaperEngine:
         self._orders: dict[str, dict] = {}
         self._trades: list[dict] = []
         self._positions: dict[str, dict] = {}
-        # token -> set(order_ids) for O(1) tick routing of pending limit orders,
-        # and token -> set(position_ids) for MTM.
-        self._pending_by_token: dict[str, set[str]] = {}
-        self._pos_by_token: dict[str, set[str]] = {}
+        # Canonical InstrumentKey -> set(order_ids) for O(1) tick routing of
+        # pending limit orders, and -> set(position_ids) for MTM.
+        #
+        # Keyed by contract, NOT by broker token: these indices were keyed by
+        # the token `resolve_option` returned, and the tick handler translated
+        # each canonical tick back through Angel's token space to find them. In
+        # any session where Angel was not connected that translation returned
+        # nothing, so pending limit orders never filled and open positions never
+        # marked to market — the paper twin of the live engine's worst bug.
+        self._pending_by_key: dict[InstrumentKey, set[str]] = {}
+        self._pos_by_key: dict[InstrumentKey, set[str]] = {}
         self._seq = 0
         self._net_pnl = 0.0
-        # (token, side, qty, order_type) -> last placement ts, for the dup guard.
+        # (key, side, qty, order_type) -> last placement ts, for the dup guard.
         self._recent: dict[tuple, float] = {}
         # Portfolio Trail Profit — one global config pushed from the renderer's
         # active profile, plus the running peak of combined open P&L.
@@ -162,12 +168,12 @@ class PaperEngine:
         return None
 
     # ── quote resolution + synthetic spread ─────────────────────────────
-    def _fill_price(self, token: str, side: str) -> float | None:
+    def _fill_price(self, key: InstrumentKey, side: str) -> float | None:
         """Execution price for a market/marketable order: BUY→ask, SELL→bid.
         Falls back to a synthetic spread around the LTP when the feed has no
         depth (illiquid / far-expiry), so those fills are realistically worse
         than the LTP instead of always perfect."""
-        ltp, bid, ask = manager.get_option_quote(token)
+        ltp, bid, ask = manager.get_option_quote(key)
         if side == "BUY":
             if ask and ask > 0:
                 return round(ask, 2)
@@ -181,12 +187,12 @@ class PaperEngine:
         return round(max(MIN_PRICE, px), 2)
 
     # ── duplicate guard ─────────────────────────────────────────────────
-    def _working_order(self, token: str, side: str) -> dict | None:
+    def _working_order(self, key: InstrumentKey, side: str) -> dict | None:
         """The existing not-yet-finished order on this instrument + side, if any.
-        Caller must hold the lock. `token` identifies the exact contract, so a
+        Caller must hold the lock. `key` identifies the exact contract, so a
         different strike, option type or expiry never collides."""
         for o in self._orders.values():
-            if (o["token"] == token and o["side"] == side
+            if (o["key"] == key and o["side"] == side
                     and o["status"] in WORKING_STATUSES):
                 return o
         return None
@@ -207,11 +213,15 @@ class PaperEngine:
             return {"ok": False, "code": "EXPIRED_CONTRACT",
                     "error": f"{underlying} {expiry} has expired — pick an active expiry."}
 
+        # The contract must still be listed by SOME connected broker (that is
+        # what resolve_option proves), but the identity carried from here on is
+        # the canonical key, not whichever broker's token happened to answer.
         tradingsymbol, token, _exch = manager.resolve_option(underlying, expiry, strike, opt_type)
         if not token:
             return {"ok": False, "error": f"Could not resolve {underlying} {expiry} "
                                           f"{int(strike)} {opt_type}."}
-        ltp, _bid, _ask = manager.get_option_quote(token)
+        ikey = InstrumentKey.option(underlying, expiry, strike, opt_type)
+        ltp, _bid, _ask = manager.get_option_quote(ikey)
 
         err = self._validate(order_type, price, ltp)
         if err:
@@ -220,8 +230,8 @@ class PaperEngine:
         with self._lock:
             # Duplicate-order guard (Issue #6 backstop).
             now = time.time()
-            key = (token, side, int(qty), order_type)
-            last = self._recent.get(key)
+            dup_key = (ikey, side, int(qty), order_type)
+            last = self._recent.get(dup_key)
             if last is not None and (now - last) < DUPLICATE_WINDOW_S:
                 return {"ok": False, "error": "Duplicate order ignored.", "duplicate": True}
 
@@ -229,14 +239,14 @@ class PaperEngine:
             # The renderer catches this first and offers "modify the existing
             # order instead"; this is the authoritative backstop. Executed,
             # cancelled and rejected orders never match.
-            if not allow_duplicate and self._working_order(token, side) is not None:
+            if not allow_duplicate and self._working_order(ikey, side) is not None:
                 return {"ok": False, "code": "DUPLICATE_PENDING",
                         "error": "A pending order already exists for this strike."}
-            self._recent[key] = now
+            self._recent[dup_key] = now
 
             oid = self._next("O")
             order = {
-                "id": oid, "ts": int(now * 1000), "token": token,
+                "id": oid, "ts": int(now * 1000), "key": ikey,
                 "underlying": underlying, "expiry": expiry, "strike": int(strike),
                 "optType": opt_type, "side": side, "orderType": order_type,
                 "lots": int(lots), "filledLots": 0, "qty": int(qty),
@@ -246,7 +256,7 @@ class PaperEngine:
             }
 
             if order_type == "MARKET":
-                fill = self._fill_price(token, side)
+                fill = self._fill_price(ikey, side)
                 if fill is None:
                     return {"ok": False, "error": "No market price available yet — "
                                                   "connect a broker so the feed is live."}
@@ -254,7 +264,7 @@ class PaperEngine:
                 self._execute(order, fill)
             else:
                 self._orders[oid] = order
-                self._pending_by_token.setdefault(token, set()).add(oid)
+                self._pending_by_key.setdefault(ikey, set()).add(oid)
 
             self._publish()
         return {"ok": True, "orderId": oid, "status": self._orders[oid]["status"],
@@ -265,7 +275,7 @@ class PaperEngine:
         order["status"] = "EXECUTED"
         order["filledLots"] = order["lots"]
         order["avgFill"] = fill
-        self._pending_by_token.get(order["token"], set()).discard(order["id"])
+        self._pending_by_key.get(order["key"], set()).discard(order["id"])
 
         self._trades.append({
             "id": self._next("T"), "orderId": order["id"], "ts": int(time.time() * 1000),
@@ -276,10 +286,10 @@ class PaperEngine:
 
         entry = round(fill, 2)
         # Brokers keep a NET position book: one row per contract, never a
-        # simultaneous long and short. Match on the token, which encodes
-        # underlying + expiry + strike + option type exactly — any difference in
-        # those is a different token and so a separate position.
-        existing = self._open_position_any(order["token"])
+        # simultaneous long and short. Match on the canonical key, which IS
+        # underlying + expiry + strike + option type — any difference in those
+        # is a different contract and so a separate position.
+        existing = self._open_position_any(order["key"])
         if existing is not None:
             if existing["side"] == order["side"]:
                 # ADD: average the cost basis and grow the quantity so the book
@@ -306,7 +316,7 @@ class PaperEngine:
         pid = self._next("p")
         risk = _compute_risk(entry, order["side"], order.get("rule"))
         pos = {
-            "id": pid, "token": order["token"], "underlying": order["underlying"],
+            "id": pid, "key": order["key"], "underlying": order["underlying"],
             "expiry": order["expiry"], "strike": order["strike"], "optType": order["optType"],
             "side": order["side"], "lots": order["lots"], "qty": order["qty"],
             "entry": entry, "avgEntry": entry, "ltp": entry, "status": "OPEN",
@@ -319,21 +329,13 @@ class PaperEngine:
             **risk,
         }
         self._positions[pid] = pos
-        self._pos_by_token.setdefault(order["token"], set()).add(pid)
+        self._pos_by_key.setdefault(order["key"], set()).add(pid)
 
-    def _open_position(self, token: str, side: str) -> dict | None:
-        """The open position on this exact contract + side, if any. Caller must
-        hold the lock."""
-        for p in self._positions.values():
-            if p["status"] == "OPEN" and p["token"] == token and p["side"] == side:
-                return p
-        return None
-
-    def _open_position_any(self, token: str) -> dict | None:
+    def _open_position_any(self, key: InstrumentKey) -> dict | None:
         """The open position on this exact contract, whichever side it is on.
         Netting means at most one can exist. Caller must hold the lock."""
         for p in self._positions.values():
-            if p["status"] == "OPEN" and p["token"] == token:
+            if p["status"] == "OPEN" and p["key"] == key:
                 return p
         return None
 
@@ -354,7 +356,7 @@ class PaperEngine:
             pos["status"] = "CLOSED"
             pos["exit"] = round(exit_px, 2)
             pos["ltp"] = round(exit_px, 2)
-            self._pos_by_token.get(pos["token"], set()).discard(pos["id"])
+            self._pos_by_key.get(pos["key"], set()).discard(pos["id"])
             return
         closed = dict(pos)
         closed["id"] = self._next("p")
@@ -465,11 +467,11 @@ class PaperEngine:
         # exactly as a manual square-off does — a stop rarely fills at its
         # trigger. Falls back to the mark when there is no quote.
         exit_side = "SELL" if long_ else "BUY"
-        fill = self._fill_price(pos["token"], exit_side) or ltp
+        fill = self._fill_price(pos["key"], exit_side) or ltp
         pos["status"] = "CLOSED"
         pos["exit"] = round(fill, 2)
         pos["exitReason"] = reason
-        self._pos_by_token.get(pos["token"], set()).discard(pos["id"])
+        self._pos_by_key.get(pos["key"], set()).discard(pos["id"])
         return True
 
     # ── Portfolio Trail Profit (book level) ──────────────────────────────
@@ -515,26 +517,36 @@ class PaperEngine:
             if p["status"] == "OPEN":
                 p["status"] = "CLOSED"
                 p["exit"] = p["ltp"]
-                self._pos_by_token.get(p["token"], set()).discard(p["id"])
+                self._pos_by_key.get(p["key"], set()).discard(p["id"])
         self._reset_portfolio_trail()
         return True
 
     # ── tick handler — pending fills + MTM (Issues #1, #2) ───────────────
-    def _on_tick(self, key, _ltp: float, _volume: int | None) -> None:
-        # Ticks are delivered under a canonical InstrumentKey, but orders and
-        # positions here are indexed by the Angel token resolve_option handed
-        # back when they were placed. Translate at the boundary rather than
-        # re-keying the live books, which would invalidate every in-flight
-        # order; they move to keys when the feed router lands.
-        token = instruments.token_for("angel", key)
-        if token is None:
-            return
+    def _on_tick(self, key: InstrumentKey, _ltp: float, _volume: int | None) -> None:
+        """A tick arrived for one contract. `key` is canonical, and so is every
+        index in this engine, so no broker-specific translation happens — which
+        is what used to make paper trading stop dead whenever the serving feed
+        was not Angel."""
+        self._evaluate(key)
+
+    def sweep(self) -> None:
+        """Re-evaluate every contract this engine holds something on, from the
+        cached quote rather than an arriving tick.
+
+        The safety net for paper, driven by the live manager's periodic cycle
+        (services.live_manager). A paper stop that only runs when a tick happens
+        to arrive is the same silent failure as a live one.
+        """
+        for key in self.subscription_keys():
+            self._evaluate(key)
+
+    def _evaluate(self, key: InstrumentKey) -> None:
         changed = False
         with self._lock:
-            # 1) Evaluate pending limit orders on this token against bid/ask.
-            pend = list(self._pending_by_token.get(token, set()))
+            # 1) Evaluate pending limit orders on this contract against bid/ask.
+            pend = list(self._pending_by_key.get(key, set()))
             if pend:
-                _l, bid, ask = manager.get_option_quote(token)
+                _l, bid, ask = manager.get_option_quote(key)
                 for oid in pend:
                     o = self._orders.get(oid)
                     if not o or o["status"] != "OPEN":
@@ -546,11 +558,11 @@ class PaperEngine:
                         fill = round(ask if o["side"] == "BUY" else bid, 2)
                         self._execute(o, fill)
                         changed = True
-            # 2) Mark open positions on this token to market, trail each one's
-            #    SL off the new mark, then act on SL / Target.
-            ltp, _b, _a = manager.get_option_quote(token)
+            # 2) Mark open positions on this contract to market, trail each
+            #    one's SL off the new mark, then act on SL / Target.
+            ltp, _b, _a = manager.get_option_quote(key)
             if ltp and ltp > 0:
-                for pid in list(self._pos_by_token.get(token, set())):
+                for pid in list(self._pos_by_key.get(key, set())):
                     p = self._positions.get(pid)
                     if not p or p["status"] != "OPEN":
                         continue
@@ -566,6 +578,18 @@ class PaperEngine:
             if changed:
                 self._publish()
 
+    def subscription_keys(self) -> set[InstrumentKey]:
+        """Contracts the paper book needs market data for: every open position
+        and every working order. Declared to the shared subscription hub so a
+        paper position keeps ticking after the user switches the option chain
+        to a different index."""
+        with self._lock:
+            keys = {p["key"] for p in self._positions.values()
+                    if p["status"] == "OPEN"}
+            keys |= {o["key"] for o in self._orders.values()
+                     if o["status"] in WORKING_STATUSES}
+        return keys
+
     # ── modify / cancel (Issue #3) ───────────────────────────────────────
     def modify(self, order_id: str, price: float | None = None,
                qty: int | None = None, lots: int | None = None) -> dict:
@@ -576,7 +600,7 @@ class PaperEngine:
             if o["status"] not in WORKING_STATUSES:
                 return {"ok": False, "error": "Only pending orders can be modified."}
             if price is not None:
-                ltp, _b, _a = manager.get_option_quote(o["token"])
+                ltp, _b, _a = manager.get_option_quote(o["key"])
                 err = self._validate("LIMIT", price, ltp)
                 if err:
                     return {"ok": False, "error": err}
@@ -596,7 +620,7 @@ class PaperEngine:
             if o["status"] not in WORKING_STATUSES:
                 return {"ok": False, "error": "Only pending orders can be cancelled."}
             o["status"] = "CANCELLED"
-            self._pending_by_token.get(o["token"], set()).discard(order_id)
+            self._pending_by_key.get(o["key"], set()).discard(order_id)
             self._publish()
         return {"ok": True}
 
@@ -614,13 +638,14 @@ class PaperEngine:
             # Everything was just squared off — republish the post-exit book.
             net = self._net_open_pnl()
         self._net_pnl = round(net, 2)
-        # `token`, `rule` and the `_`-prefixed trail bookkeeping stay internal.
+        # `key` (an InstrumentKey object), `rule` and the `_`-prefixed trail
+        # bookkeeping stay internal — the wire carries the display fields only.
         positions = [
             {k: v for k, v in p.items()
-             if k not in ("token", "rule") and not k.startswith("_")}
+             if k not in ("key", "rule") and not k.startswith("_")}
             for p in self._positions.values()
         ]
-        orders = [{k: v for k, v in o.items() if k not in ("token", "rule")}
+        orders = [{k: v for k, v in o.items() if k not in ("key", "rule")}
                   for o in self._orders.values()]
         orders.sort(key=lambda o: o["ts"], reverse=True)
         trades = sorted(self._trades, key=lambda t: t["ts"], reverse=True)
@@ -680,12 +705,16 @@ class PaperEngine:
     def working_order_id(self, underlying: str, expiry: str, strike: float,
                          opt_type: str, side: str) -> str | None:
         """Id of an existing working order on this contract + side, for the
-        shared duplicate rule. Mirrors LiveBook.working_order_id."""
-        token = manager.resolve_option(underlying, expiry, strike, opt_type)[1]
-        if not token:
-            return None
+        shared duplicate rule. Mirrors LiveBook.working_order_id.
+
+        Resolves nothing at a broker: the contract's canonical key is derived
+        from its own economics, so this answers correctly even with no broker
+        connected — where it previously returned None (no token) and quietly
+        stopped catching duplicates.
+        """
+        key = InstrumentKey.option(underlying, expiry, strike, opt_type)
         with self._lock:
-            existing = self._working_order(token, side)
+            existing = self._working_order(key, side)
             return existing["id"] if existing else None
 
     def orders_today(self) -> int:
@@ -716,8 +745,8 @@ class PaperEngine:
             self._orders.clear()
             self._trades.clear()
             self._positions.clear()
-            self._pending_by_token.clear()
-            self._pos_by_token.clear()
+            self._pending_by_key.clear()
+            self._pos_by_key.clear()
             self._net_pnl = 0.0
             self._reset_portfolio_trail()
             self._publish()
@@ -743,7 +772,7 @@ class PaperEngine:
             if fraction >= 1 or exit_lots >= p["lots"] or (p["lots"] - exit_lots) < 1:
                 p["status"] = "CLOSED"
                 p["exit"] = p["ltp"]
-                self._pos_by_token.get(p["token"], set()).discard(pos_id)
+                self._pos_by_key.get(p["key"], set()).discard(pos_id)
             else:
                 p["lots"] -= exit_lots
                 p["qty"] = p["lots"] * self._lot_size(p)
@@ -829,20 +858,22 @@ class PaperEngine:
             _sym, token, _exch = manager.resolve_option(
                 src["underlying"], src["expiry"], new_strike, src["optType"])
             if not token:
-                # Never roll into a contract we cannot resolve — the leg would
-                # open with no token and never mark to market.
+                # Never roll into a contract no connected broker lists — the leg
+                # would open on a contract nothing can quote or trade.
                 return {"ok": False, "code": "INVALID_ROLL",
                         "error": f"Could not resolve {src['underlying']} "
                                  f"{src['expiry']} {new_strike} {src['optType']}."}
+            rolled_key = InstrumentKey.option(src["underlying"], src["expiry"],
+                                              new_strike, src["optType"])
             # Close the source leg.
             src["status"] = "CLOSED"
             src["exit"] = src["ltp"]
-            self._pos_by_token.get(src["token"], set()).discard(pos_id)
+            self._pos_by_key.get(src["key"], set()).discard(pos_id)
             # Open the rolled leg at the new strike, re-deriving risk from the rule.
             pid = self._next("p")
             risk = _compute_risk(entry, src["side"], src.get("rule"))
             rolled = {
-                "id": pid, "token": token or src["token"], "underlying": src["underlying"],
+                "id": pid, "key": rolled_key, "underlying": src["underlying"],
                 "expiry": src["expiry"], "strike": int(new_strike), "optType": src["optType"],
                 "side": src["side"], "lots": src["lots"], "qty": src["qty"],
                 "entry": entry, "avgEntry": entry, "ltp": entry, "status": "OPEN",
@@ -855,8 +886,7 @@ class PaperEngine:
                 **risk,
             }
             self._positions[pid] = rolled
-            if token:
-                self._pos_by_token.setdefault(token, set()).add(pid)
+            self._pos_by_key.setdefault(rolled_key, set()).add(pid)
             self._publish()
         return {"ok": True}
 
@@ -866,7 +896,7 @@ class PaperEngine:
                 if p["status"] == "OPEN":
                     p["status"] = "CLOSED"
                     p["exit"] = p["ltp"]
-                    self._pos_by_token.get(p["token"], set()).discard(p["id"])
+                    self._pos_by_key.get(p["key"], set()).discard(p["id"])
             self._publish()
         return {"ok": True}
 

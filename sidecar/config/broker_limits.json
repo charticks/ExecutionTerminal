@@ -3,15 +3,28 @@
     "Per-order quantity limits used by the automatic order-splitting engine.",
     "These are the FALLBACK values: the broker limit resolver first asks the",
     "broker adapter for live limits (fetch_order_limits) and only uses this file",
-    "when the broker does not expose them. Adding a new broker requires an entry",
-    "here (and optionally an adapter) \u2014 never a change to the execution engine.",
+    "when the broker does not expose them. Adding a new broker requires nothing",
+    "here unless it deviates — never a change to the execution engine.",
     "",
-    "Lookup order: <broker>.<UNDERLYING> -> <broker>.* -> default.",
+    "Lookup order: <broker>.<UNDERLYING> -> <broker>.* -> exchange.<UNDERLYING>",
+    "  -> exchange.* -> default.*",
+    "",
+    "The freeze quantities live under \"exchange\" because that is what they are:",
+    "an NSE/BSE/MCX property of the CONTRACT, identical whichever broker routes",
+    "the order. They used to be duplicated into the angel and icici blocks and",
+    "omitted from kotak and dhan, which left those two with no cap at all — so a",
+    "Kotak-only or Dhan-only user's oversized order was sent whole for the",
+    "exchange to reject, with an opaque broker error instead of a clear one.",
+    "",
+    "supportsSplitting is a property of CHARTICKS, not of the broker: splitting is",
+    "several ordinary orders sent in sequence (OrderManager._place_with_splitting),",
+    "so every broker supports it. A broker block may still set it false to opt out.",
+    "",
     "maxLotsPerOrder / maxQtyPerOrder may be null (= no cap on that dimension);",
     "when both are null, or supportsSplitting is false, the order is sent whole.",
-    "Values below mirror the exchange freeze limits used by the legacy app",
-    "(app/order_manager.py:_get_max_lots_per_order) \u2014 verify against the current",
-    "NSE/BSE freeze-quantity circular before relying on them."
+    "VERIFY these against the current NSE / BSE / MCX freeze-quantity circular",
+    "before relying on them — the exchanges revise them, and a stale value here",
+    "means orders split into children the exchange still rejects."
   ],
   "default": {
     "*": {
@@ -20,7 +33,7 @@
       "supportsSplitting": false
     }
   },
-  "angel": {
+  "exchange": {
     "NIFTY": {
       "maxLotsPerOrder": 27,
       "maxQtyPerOrder": null,
@@ -51,61 +64,19 @@
       "maxQtyPerOrder": null,
       "supportsSplitting": true
     },
+    "CRUDEOIL": {
+      "maxLotsPerOrder": 10,
+      "maxQtyPerOrder": null,
+      "supportsSplitting": true
+    },
     "*": {
       "maxLotsPerOrder": 27,
       "maxQtyPerOrder": null,
       "supportsSplitting": true
     }
   },
-  "kotak": {
-    "*": {
-      "maxLotsPerOrder": null,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": false
-    }
-  },
-  "dhan": {
-    "*": {
-      "maxLotsPerOrder": null,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": false
-    }
-  },
-  "icici": {
-    "NIFTY": {
-      "maxLotsPerOrder": 27,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "BANKNIFTY": {
-      "maxLotsPerOrder": 30,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "FINNIFTY": {
-      "maxLotsPerOrder": 27,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "MIDCPNIFTY": {
-      "maxLotsPerOrder": 28,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "SENSEX": {
-      "maxLotsPerOrder": 50,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "BANKEX": {
-      "maxLotsPerOrder": 30,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    },
-    "*": {
-      "maxLotsPerOrder": 27,
-      "maxQtyPerOrder": null,
-      "supportsSplitting": true
-    }
-  }
+  "angel": {},
+  "kotak": {},
+  "dhan": {},
+  "icici": {}
 }

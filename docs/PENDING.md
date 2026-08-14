@@ -82,9 +82,13 @@ per-broker adapter, selected by connected broker — **not** three always-on soc
 
 ### C. Known limitations / follow-ups from the paper-engine work
 
-- **Position MTM freezes** if its option token leaves the subscribed option-chain
-  window (switch index/expiry away → P&L stops). Fix: register position tokens in
-  the `SubscriptionRegistry` so they always stream.
+- ~~**Position MTM freezes** if its option token leaves the subscribed
+  option-chain window (switch index/expiry away → P&L stops).~~ **Done
+  2026-08-13**: every open live and paper position declares its own contracts to
+  the shared subscription hub (`sidecar/services/subscriptions.py`), which sends
+  the union, so the chain can no longer unsubscribe them. This was worse than a
+  frozen P&L — with no ticks, the position's stop loss stopped evaluating too.
+  See `docs/LIVE-POSITION-MANAGEMENT.md` §2.
 - **Paper book is in-memory** — sidecar restart clears open paper orders /
   positions. Add persistence if session survival matters.
 - **Paper now requires a connected broker feed** (no offline mock fallback) —
@@ -96,6 +100,9 @@ per-broker adapter, selected by connected broker — **not** three always-on soc
   can double up.~~ **Done 2026-08-13**: broker-independent framework in
   `sidecar/services/idempotency/`, native `correlationId` on Dhan, tag echo on
   Kotak/ICICI, attribute matching on Angel. See `docs/IDEMPOTENCY.md`.
-- **Fills made outside Charticks** are still invisible to the position book: the
-  sync engine reads the broker's order book but only tracks orders it placed, so
-  a trade made in the broker's own app never appears.
+- ~~**Fills made outside Charticks** are still invisible to the position book.~~
+  **Done 2026-08-13**: `sidecar/services/position_reconciler.py` reads every
+  connected account's position book and folds it into the live book. A position
+  Charticks did not open appears as **unmanaged** — displayed, counted toward
+  exposure limits, never given an invented stop — and the user can adopt it into
+  full management or leave it alone.

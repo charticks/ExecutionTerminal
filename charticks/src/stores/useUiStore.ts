@@ -9,8 +9,11 @@ interface UiState {
   density: Density;
   screen: Screen;
   /** Raised by marketGate() when a trading action is attempted outside market
-   *  hours; the single "Market Closed" dialog lives in App and reads this. */
-  marketClosedNotice: boolean;
+   *  hours; the single "Market Closed" dialog lives in App and reads this.
+   *  A string carries a MORE SPECIFIC reason than the generic message — a
+   *  holiday name, or whatever the engine sent back — because "the market is
+   *  closed" on a Tuesday morning reads as a bug rather than as a fact. */
+  marketClosedNotice: boolean | string;
   /** Working order the user asked to modify (from the duplicate-order dialog).
    *  The matching row in the Home position grid enters edit mode and clears this. */
   editOrderId: string | null;
@@ -18,7 +21,7 @@ interface UiState {
   toggleTheme: () => void;
   setDensity: (d: Density) => void;
   setScreen: (s: Screen) => void;
-  setMarketClosedNotice: (v: boolean) => void;
+  setMarketClosedNotice: (v: boolean | string) => void;
   setEditOrderId: (id: string | null) => void;
 }
 

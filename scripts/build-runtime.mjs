@@ -60,6 +60,35 @@ function dirSize(dir) {
   return total;
 }
 
+/**
+ * Bytecode is deliberately NOT shipped. Recording why, because it looks like an
+ * obvious win and was tried:
+ *
+ * Python compiles a module from source when there is no cached bytecode, and
+ * there are ~2,650 `.py` files here. Pre-compiling them at build time and
+ * shipping the `__pycache__` directories was measured on the packaged runtime:
+ *
+ *     import server, no bytecode, cold OS file cache .... 5.70s
+ *     import server, no bytecode, warm OS file cache .... 2.61 - 2.85s
+ *     import server, bytecode shipped .................. 1.94 - 2.48s
+ *
+ * So it saves ~0.7s on a warm launch, and more on the very first one. It was
+ * still the wrong trade, for two reasons found by trying it:
+ *
+ *  1. **The install directory is writable.** Charticks installs to
+ *     `%LOCALAPPDATA%\Programs\charticks`, not Program Files, so Python writes
+ *     the cache itself on first launch and every launch after that is warm
+ *     anyway. The saving is real only for the first launch after an install.
+ *
+ *  2. **It broke the installer.** The extra ~2,650 files took
+ *     `resources/python` from ~150 MB to 193 MB, and NSIS then failed outright:
+ *     `Internal compiler error #12345: error creating mmap the size of
+ *     151740027`. An installer that does not build is not a trade-off.
+ *
+ * The remaining cost is therefore one slow launch per install, which is the
+ * right place for it. `prunePycache` keeps the tree clean so a developer's
+ * local `__pycache__` never leaks into a build.
+ */
 function prunePycache(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);

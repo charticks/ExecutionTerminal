@@ -528,10 +528,17 @@ const NOTIFY_ROWS: { key: keyof ProfileConfig["notify"]; label: string }[] = [
   { key: "system", label: "System / Connection Alerts" },
 ];
 
+/** Notification preferences.
+ *
+ *  Deliberately labelled as not yet active. Nothing reads `notify` — there is no
+ *  notification system behind it — and a settings card that looks enforced and
+ *  is not is worse than one that is absent, because the user stops watching for
+ *  the event themselves. Every alert these describe is written to the Activity
+ *  log and to logs/orders.log today. */
 function NotificationsCard({ draft, patch }: Draft) {
   const notify = draft.notify;
   return (
-    <Card title="Notifications" hint="Alerts for this profile" span={4}>
+    <Card title="Notifications" hint="Not yet active — see note below" span={4}>
       <div className="sf-toggles">
         {NOTIFY_ROWS.map((r) => (
           <Toggle
@@ -542,6 +549,12 @@ function NotificationsCard({ draft, patch }: Draft) {
           />
         ))}
       </div>
+      <p className="sf-note">
+        These preferences are saved but <b>not yet acted on</b> — Charticks does
+        not raise desktop or sound notifications in this version. Order fills,
+        modifications, SL / Target hits and connection changes all appear in the
+        Activity log and in <code>logs/orders.log</code>.
+      </p>
     </Card>
   );
 }

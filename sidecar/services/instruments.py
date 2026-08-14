@@ -20,12 +20,22 @@ vocabulary without depending on each other.
 """
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 
 INDEX = "INDEX"
 OPT = "OPT"
 FUT = "FUT"
+
+# A broker tradingsymbol for an option leg: NAME + expiry + strike + CE/PE, with
+# no separators — "NIFTY28AUG2625000CE". Brokers write the expiry with either a
+# two- or four-digit year, so both are accepted and normalised to four.
+_TRADINGSYMBOL = re.compile(
+    r"^([A-Z]+)(\d{1,2})([A-Z]{3})(\d{2}|\d{4})(\d+)(CE|PE)$")
+# The same contract in display form: "NIFTY 28AUG2026 25000 CE".
+_SPACED = re.compile(
+    r"^([A-Z]+)\s+(\d{1,2}[A-Z]{3}\d{2,4})\s+(\d+(?:\.\d+)?)\s+(CE|PE)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +75,77 @@ class InstrumentKey:
     def future(cls, underlying: str, expiry: str) -> "InstrumentKey":
         return cls(underlying=(underlying or "").upper(), segment=FUT,
                    expiry=(expiry or "").upper())
+
+    # ── serialised identity ───────────────────────────────────────────────
+    # `position_id` is the canonical key written down: it is what the live
+    # position book uses as a position id, what the renderer receives, and what
+    # is persisted to disk. Round-tripping through `from_position_id` is what
+    # lets a restarted sidecar rebuild an InstrumentKey without any broker
+    # being connected yet — the whole point of a broker-independent key.
+    @property
+    def position_id(self) -> str:
+        return f"{self.underlying}|{self.expiry}|{self.strike}|{self.opt_type}"
+
+    @classmethod
+    def from_position_id(cls, text: str) -> "InstrumentKey | None":
+        parts = (text or "").split("|")
+        if len(parts) != 4:
+            return None
+        underlying, expiry, strike, opt_type = parts
+        try:
+            return cls.option(underlying, expiry, float(strike), opt_type)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def from_symbol(cls, symbol: str) -> "InstrumentKey | None":
+        """Best-effort parse of a broker's own option symbol.
+
+        The fallback path for reconciliation: a broker position row is matched
+        to a canonical key by its token first (exact, via the registry), and by
+        its symbol only when the token is not one we have bound. Returns None
+        rather than guessing when the text is not an option leg — an unparsed
+        row is reported as unmanaged, which is safe; a mis-parsed one would be
+        matched to the wrong contract, which is not.
+        """
+        raw = (symbol or "").strip().upper()
+        if not raw:
+            return None
+        m = _TRADINGSYMBOL.match(raw.replace("-", ""))
+        if m:
+            # "NIFTY28AUG2625000CE" splits two ways — year 26 + strike 25000, or
+            # year 2625 + strike 000 — and only the reading that produces BOTH a
+            # sane year and a sane strike can be right. If two readings survive
+            # that test the symbol is genuinely ambiguous, and this returns None
+            # rather than pick one: a wrong contract here would size and route a
+            # real exit against a position the user does not hold.
+            name, digits, mon, opt = m.group(1), m.group(2), m.group(3), m.group(6)
+            tail = m.group(4) + m.group(5)
+            candidates = []
+            for cut, span in ((2, "20{}"), (4, "{}")):
+                year_text, strike_text = tail[:cut], tail[cut:]
+                if len(year_text) < cut or not strike_text:
+                    continue
+                year = span.format(year_text)
+                if not (2000 <= int(year) <= 2099):
+                    continue
+                strike = int(strike_text)
+                if not (0 < strike <= 999_999):
+                    continue
+                candidates.append((year, strike))
+            if len(candidates) != 1:
+                return None
+            year, strike = candidates[0]
+            return cls.option(name, f"{int(digits):02d}{mon}{year}",
+                              float(strike), opt)
+        m = _SPACED.match(raw)
+        if m:
+            expiry = m.group(2)
+            # "28AUG26" -> "28AUG2026"; a four-digit year is left alone.
+            if len(expiry) == 7:
+                expiry = f"{expiry[:5]}20{expiry[5:]}"
+            return cls.option(m.group(1), expiry, float(m.group(3)), m.group(4))
+        return None
 
     def __str__(self) -> str:
         if self.segment == INDEX:

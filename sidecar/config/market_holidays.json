@@ -1,0 +1,50 @@
+{
+  "_comment": [
+    "Trading holidays, by segment and ISO date. Read by services/market_session.py.",
+    "",
+    "'equity' gates NSE and BSE derivatives (NIFTY, BANKNIFTY, FINNIFTY,",
+    "MIDCPNIFTY, SENSEX, BANKEX). 'commodity' gates MCX (CRUDEOIL), which trades",
+    "on several equity holidays and in an evening-only session on some others.",
+    "An evening-only day is deliberately NOT modelled: it is listed as a trading",
+    "day and the broker remains the authority on the exact minute.",
+    "",
+    "MAINTENANCE: these lists must be refreshed each calendar year from the NSE",
+    "and MCX holiday circulars. A missing or unreadable file degrades to 'every",
+    "weekday is a trading day' — the behaviour before the calendar existed — so",
+    "a stale file loses the clear message, never the ability to trade.",
+    "",
+    "The 2026 dates below are seeded from the published NSE/MCX calendars. VERIFY",
+    "them against the exchange circular before the year starts; exchanges add and",
+    "move dates (and a Muhurat session is a trading day, not a holiday)."
+  ],
+  "equity": {
+    "2026-01-26": "Republic Day",
+    "2026-03-04": "Holi",
+    "2026-03-21": "Id-ul-Fitr (Ramzan Id)",
+    "2026-03-26": "Ram Navami",
+    "2026-03-31": "Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-27": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-08-15": "Independence Day",
+    "2026-08-26": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-09": "Diwali Balipratipada",
+    "2026-11-24": "Guru Nanak Jayanti",
+    "2026-12-25": "Christmas"
+  },
+  "commodity": {
+    "2026-01-26": "Republic Day",
+    "2026-03-04": "Holi",
+    "2026-03-21": "Id-ul-Fitr (Ramzan Id)",
+    "2026-04-03": "Good Friday",
+    "2026-05-01": "Maharashtra Day",
+    "2026-08-15": "Independence Day",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-11-09": "Diwali Balipratipada",
+    "2026-12-25": "Christmas"
+  }
+}

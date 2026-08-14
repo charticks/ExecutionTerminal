@@ -109,7 +109,7 @@
     <td>Live position still missing after ~10 seconds</td>
     <td>The app could not read it from your broker.</td>
     <td>Check it exists in your broker's own Positions screen, then send
-        <code>sidecar.log</code> (below).</td>
+        <code>application.log</code> (below).</td>
   </tr>
   <tr>
     <td>“Position still open — …” after clicking Close</td>
@@ -119,8 +119,10 @@
   </tr>
   <tr>
     <td>Stop Loss / Target not firing on a live position</td>
-    <td>Not a fault — automatic exits do not work in Live yet.</td>
-    <td>Close manually, or set the stop in your broker's terminal. See
+    <td>Live stops are enforced by this app from the price feed — so they need the
+        app running and the feed alive.</td>
+    <td>Check the feed is connected (status bar) and the position shows a live
+        price. Then send <code>application.log</code>. See
         <a href="KNOWN-LIMITATIONS.html">KNOWN-LIMITATIONS.html</a>.</td>
   </tr>
   <tr>
@@ -134,28 +136,51 @@
 
 <p>Paste this into the File Explorer address bar:</p>
 
-<div class="pathbox">%APPDATA%\charticks\logs</div>
+<div class="pathbox">%APPDATA%\Charticks\logs</div>
 
-<p>Inside are date-named folders. Send the <strong>newest</strong> one. It holds two files
-and both are useful:</p>
+<p>Send <strong>everything in that folder</strong> — the files are small. There are no
+date-named subfolders; each file is appended to as you use the app.</p>
 
 <table>
   <tr><th>File</th><th>What it contains</th></tr>
   <tr>
-    <td><code>sidecar.log</code></td>
-    <td>What the app's engine decided — feed problems, rejected orders, why a
-        position did or did not appear. <strong>Send this one first.</strong></td>
+    <td><code>application.log</code></td>
+    <td>Every event, in order — the full narrative.
+        <strong>Send this one first.</strong></td>
   </tr>
   <tr>
-    <td><code>app.log</code></td>
-    <td>Raw broker API errors from the Angel library.</td>
+    <td><code>orders.log</code></td>
+    <td>Orders: placed, modified, cancelled, filled or rejected, and why.</td>
+  </tr>
+  <tr>
+    <td><code>risk.log</code></td>
+    <td>Why an order was refused — a limit you set, or a margin shortfall.</td>
+  </tr>
+  <tr>
+    <td><code>broker.log</code></td>
+    <td>Logins, disconnects, reconnects and session expiry.</td>
+  </tr>
+  <tr>
+    <td><code>websocket.log</code></td>
+    <td>Market-data feed: connects, interruptions and recovery.</td>
+  </tr>
+  <tr>
+    <td><code>exceptions.log</code></td>
+    <td>Unexpected errors, with the full technical detail.</td>
+  </tr>
+  <tr>
+    <td><code>sidecar-process.log</code></td>
+    <td>Written if the trading engine fails to start at all. If the app sits on
+        "Connecting…", this is the file that says why.</td>
   </tr>
 </table>
 
 <div class="box warn">
-  <p><strong>If you were given an older instruction pointing at</strong>
-  <code>%LOCALAPPDATA%\Programs\charticks\resources\sidecar\logs</code> —
-  that path is out of date and will be empty. Use the one above.</p>
+  <p><strong>If you were given an older instruction</strong> pointing at
+  <code>%LOCALAPPDATA%\Programs\charticks\resources\sidecar\logs</code>, or telling
+  you to send "the newest date folder", or naming <code>sidecar.log</code> —
+  those are all out of date. Use the folder above; the files listed there are the
+  current ones.</p>
 </div>
 
 <h2>A live position is missing from the Positions grid</h2>
@@ -171,8 +196,9 @@ instant. Work through these:</p>
   <li><strong>Wait ~10 seconds</strong> and look again.</li>
   <li><strong>Is the Positions panel in the right mode?</strong> The panel follows the
       Paper/Live switch, not the broker connection. Live positions only show in Live.</li>
-  <li>Still missing while your broker clearly shows it — send <code>sidecar.log</code>.
-      It records exactly what the broker returned and why a row was skipped.</li>
+  <li>Still missing while your broker clearly shows it — send
+      <code>application.log</code> and <code>orders.log</code>. Together they record
+      exactly what the broker returned and why a row was skipped.</li>
 </ol>
 
 <h2>The app opens but shows no data at all</h2>
@@ -225,7 +251,7 @@ from your own machine. To confirm it is running, open PowerShell and run:</p>
 <ol>
   <li>A screenshot of the <strong>whole</strong> window</li>
   <li>What you did immediately before it went wrong</li>
-  <li>The newest folder from <code>%APPDATA%\charticks\logs</code></li>
+  <li>Everything in <code>%APPDATA%\Charticks\logs</code></li>
 </ol>
 
 <div class="box danger">

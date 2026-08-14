@@ -50,10 +50,32 @@ from .base import (
 # How often to read each broker's order book while anything is open. Fast enough
 # that a fill shows up promptly, slow enough not to hammer a rate-limited API.
 POLL_INTERVAL_S = 2.0
-# Stop chasing an order that never reaches a terminal state — a broker that
-# dropped it, or an id we can no longer find in the book. It stays visible in
-# its last known state rather than being polled forever.
-GIVE_UP_AFTER_S = 15 * 60.0
+
+# Stop chasing an order the broker no longer reports at all.
+#
+# This used to be a flat 15-minute age limit, which was wrong in the one case
+# that matters most: a DAY limit order resting away from the market. Such an
+# order is perfectly healthy and routinely sits unfilled for hours — but at
+# 15 minutes it was dropped from tracking, and three things broke at once.
+# Modify and cancel started answering "Charticks is not tracking a live order";
+# the row froze at its last state; and, worst, if it later filled, no fill was
+# ever booked. The position then arrived only through broker reconciliation, as
+# an UNMANAGED position with no stop loss — the trade the user had configured a
+# stop for ended up being the one with no stop at all.
+#
+# Age is therefore not evidence of anything. What is evidence is the broker's
+# own order book: an order it still lists is still live, however old, and an
+# order that has vanished from a book we successfully read is gone. Only the
+# second case gives up, and only after several consecutive clean reads, because
+# a book can briefly omit a just-placed order.
+MISSING_POLLS_BEFORE_GIVE_UP = 5
+# An order younger than this is never abandoned for being missing: several
+# brokers' order books lag their own placement acknowledgement by a second or two.
+MISSING_GRACE_S = 30.0
+# Absolute backstop for an order that is neither confirmed nor denied because
+# its account never reconnects. A full trading day plus the evening commodity
+# session — long enough that no legitimately resting order is ever caught.
+ABANDON_AFTER_S = 16 * 3600.0
 
 
 @dataclass
@@ -101,6 +123,13 @@ class TrackedOrder:
     exit_for: str = ""
     created_ts: float = field(default_factory=time.time)
     updated_ts: float = field(default_factory=time.time)
+    # Consecutive SUCCESSFUL reads of this account's order book in which this
+    # order did not appear. Reset by any sighting. This — not elapsed time — is
+    # what decides that an order is gone: a resting limit order is absent from
+    # nothing, while an order the broker has genuinely dropped is absent from
+    # every read. A failed poll never touches it, because a read that errored is
+    # not evidence of absence.
+    missing_polls: int = 0
 
     @property
     def symbol(self) -> str:
@@ -287,24 +316,55 @@ class OrderSyncEngine:
             self.ingest(broker, account_id, rows)
 
     def _expire_stale(self, pending: list[TrackedOrder]) -> None:
-        cutoff = time.time() - GIVE_UP_AFTER_S
+        """Absolute backstop only — see ABANDON_AFTER_S.
+
+        This no longer expires orders for being merely old. An order that is
+        still in the broker's book is still live whatever its age, and dropping
+        one that later filled was how a configured stop loss ended up on a
+        position nothing was managing. Absence from the book is handled by
+        `_give_up`, driven by successful reads rather than by the clock.
+        """
+        cutoff = time.time() - ABANDON_AFTER_S
         for order in pending:
             if order.created_ts < cutoff:
-                diagnostics.event(
-                    "orders", "Order state", "abandoned", level="warn",
-                    broker=order.broker, account=order.account_id,
-                    symbol=order.symbol, orderId=order.order_id,
-                    lastStatus=order.status,
-                    reason=f"no terminal state after {GIVE_UP_AFTER_S / 60:.0f} minutes")
-                with self._lock:
-                    order.status = order.status  # keep last known
-                    order.created_ts = time.time()  # stop re-logging
-                    self._orders.pop(self._key(order.broker, order.order_id), None)
+                self._give_up(order, f"no terminal state after "
+                                     f"{ABANDON_AFTER_S / 3600:.0f} hours")
+
+    def _give_up(self, order: TrackedOrder, reason: str) -> None:
+        """Stop tracking an order, releasing anything that was waiting on it.
+
+        Untracking used to just drop the record, which silently stranded two
+        things: an exit claim (the position's stop stayed disarmed for the rest
+        of the session) and an idempotency claim (later identical orders stayed
+        blocked). Both are released here so giving up is never worse than never
+        having tracked it.
+        """
+        with self._lock:
+            if self._orders.pop(self._key(order.broker, order.order_id), None) is None:
+                return
+        diagnostics.event(
+            "orders", "Order state", "abandoned", level="warn",
+            broker=order.broker, account=order.account_id, symbol=order.symbol,
+            orderId=order.order_id, lastStatus=order.status,
+            filledQty=order.filled_qty, requestedQty=order.qty, reason=reason)
+        if order.exit_for:
+            from services.live_book import live_book
+            live_book.end_exit(order.exit_for)
+        if order.client_order_id:
+            from services.idempotency import guard as idempotency_guard
+            idempotency_guard.note_terminal(order.client_order_id, order.order_id)
 
     # ── state application ─────────────────────────────────────────────────
-    def ingest(self, broker: str, account_id: str, rows: list[BrokerOrder]) -> None:
+    def ingest(self, broker: str, account_id: str, rows: list[BrokerOrder],
+               complete: bool = True) -> None:
         """Apply broker rows to tracked orders. Also the entry point for a
-        push-based (WebSocket) source — it need not poll to use this."""
+        push-based (WebSocket) source — it need not poll to use this.
+
+        `complete` says whether `rows` is this account's WHOLE order book. A
+        poller's read is; a WebSocket push carrying one changed order is not,
+        and an incremental update must never be read as "every other order has
+        disappeared". Only a complete read counts an order as missing.
+        """
         by_id = {r.order_id: r for r in rows}
         with self._lock:
             tracked = [o for o in self._orders.values()
@@ -313,7 +373,29 @@ class OrderSyncEngine:
         for order in tracked:
             row = by_id.get(order.order_id)
             if row is not None:
+                order.missing_polls = 0
                 self._apply(order, row)
+            elif complete:
+                self._note_missing(order, len(rows))
+
+    def _note_missing(self, order: TrackedOrder, book_size: int) -> None:
+        """This order was not in a book we successfully read.
+
+        An empty book is deliberately not treated as proof: several SDKs return
+        an empty list for a read that quietly failed, and the whole point of
+        counting consecutive absences is to avoid acting on one bad answer.
+        """
+        if book_size == 0:
+            return
+        if (time.time() - order.created_ts) < MISSING_GRACE_S:
+            return  # the book can lag its own placement acknowledgement
+        with self._lock:
+            order.missing_polls += 1
+            missing = order.missing_polls
+        if missing < MISSING_POLLS_BEFORE_GIVE_UP:
+            return
+        self._give_up(order, f"absent from {missing} consecutive reads of the "
+                             f"broker's order book")
 
     def _apply(self, order: TrackedOrder, row: BrokerOrder) -> None:
         newly_filled = 0
@@ -373,7 +455,23 @@ class OrderSyncEngine:
         live_book.record_fill(
             order.underlying, order.expiry, order.strike, order.opt_type,
             order.side, qty, max(1, qty // order.lot_size), price,
-            token=order.token, rule=order.rule)
+            token=order.token, rule=order.rule,
+            account_id=order.account_id, broker=order.broker,
+            product=order.product)
+        # Re-read the broker's own position book now rather than in up to four
+        # seconds: the position this fill created must be confirmed (and so
+        # armed for management) as close to immediately as the broker allows.
+        from services.position_reconciler import reconciler
+        reconciler.reconcile_soon()
+        # Auto-hedge is driven from HERE — a broker-confirmed fill — and not from
+        # the renderer's "order accepted", which used to place a protective leg
+        # against a short that the exchange then rejected. Exits are excluded:
+        # closing a short does not want a hedge, it retires one.
+        if not order.exit_for:
+            from services.hedge import hedge_manager
+            hedge_manager.on_entry_fill(
+                order.underlying, order.expiry, order.strike, order.opt_type,
+                order.side, qty, max(1, qty // order.lot_size), order.product)
         diagnostics.event(
             "orders", "Fill booked",
             "success" if order.status == FILLED else PARTIAL,

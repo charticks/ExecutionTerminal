@@ -58,6 +58,25 @@ export function pushRiskConfig(force = false) {
   });
 }
 
+let lastHedge = "";
+
+/** Push the active profile's Auto Hedge config.
+ *
+ *  Auto-hedge is enforced by the sidecar, on broker-confirmed fills — it used to
+ *  be placed by the renderer on "order accepted", which hedged shorts the
+ *  exchange then rejected and hedged nothing at all when the window was closed.
+ *  Like the risk config, the sidecar can only enforce what it has been told, so
+ *  this is pushed on startup, on every change and on every reconnect. */
+export function pushHedgeConfig(force = false) {
+  const payload = useSettingsStore.getState().hedgeConfig();
+  const encoded = JSON.stringify(payload);
+  if (!force && encoded === lastHedge) return;
+  lastHedge = encoded;
+  bridge.post("/hedge-config", payload).catch(() => {
+    lastHedge = "";
+  });
+}
+
 let wired = false;
 
 /** Wire the pushes. Called once at startup alongside the other store bootstraps. */
@@ -65,11 +84,18 @@ export function syncRiskConfig() {
   if (wired) return;
   wired = true;
   pushRiskConfig(true);
-  useSettingsStore.subscribe(() => pushRiskConfig());
+  pushHedgeConfig(true);
+  useSettingsStore.subscribe(() => {
+    pushRiskConfig();
+    pushHedgeConfig();
+  });
   useSessionLimits.subscribe(() => pushRiskConfig());
   bridge.onStatus((connected) => {
     // A restarted sidecar has no config and is refusing live orders — re-send
     // unconditionally rather than relying on the dedupe cache.
-    if (connected) pushRiskConfig(true);
+    if (connected) {
+      pushRiskConfig(true);
+      pushHedgeConfig(true);
+    }
   });
 }

@@ -51,15 +51,18 @@
 <p class="sub">Charticks 0.1.0 · What does not work yet, and what that means for you</p>
 
 <div class="banner">
-  <h2>⚠ Live positions have no automatic protection</h2>
-  <p>In <strong>Live</strong> mode this build sends real orders to your broker. You
-  <strong>can</strong> open a position and close it (fully, partially, or all at once).</p>
-  <p>But <strong>Stop Loss, Target and Trailing Stop Loss do NOT work on live
-  positions.</strong> Nothing exits automatically. A live position is only closed when
-  <em>you</em> close it.</p>
-  <p><strong>Keep your broker's own app or website open as a backup exit</strong> — if this
-  app, your PC or your internet fails, that is your only way out.</p>
-  <p>Paper mode has none of these limits.</p>
+  <h2>⚠ Your live stop lives in Charticks, not at your broker</h2>
+  <p>In <strong>Live</strong> mode this build sends real orders to your broker. Stop Loss,
+  Target and Trailing Stop Loss <strong>do</strong> now act on live positions — but they
+  are enforced <strong>by this application</strong>, watching the price tick by tick. No
+  stop order is resting at the exchange.</p>
+  <p>So if Charticks, your PC, or your internet connection stops, <strong>nothing is
+  protecting the position.</strong> The stop goes away with the app.</p>
+  <p><strong>Keep your broker's own app or website open as a backup exit.</strong> If
+  anything fails, that is your only way out.</p>
+  <p>Automatic exits also only ever act on quantity your broker has <em>confirmed</em> as
+  filled — a partially filled entry is managed at the filled size, not the size you
+  asked for.</p>
 </div>
 
 <h2>Paper vs Live — what actually works</h2>
@@ -72,65 +75,101 @@
   <tr><td>Close a position</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
   <tr><td>Partial exit (25 / 50 %)</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
   <tr><td>Square off all</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
-  <tr><td><strong>Modify a resting order</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
-  <tr><td><strong>Cancel a resting order</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
-  <tr><td><strong>Stop Loss / Target</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
-  <tr><td><strong>Trailing Stop Loss</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
-  <tr><td><strong>Adjust lots on a position</strong></td><td class="yes">Yes</td><td class="no">No</td></tr>
-  <tr><td><strong>Roll a position</strong></td><td class="yes">Yes</td><td class="no">No — see below</td></tr>
-  <tr><td>Max position / session limits</td><td class="yes">Yes</td><td class="no">Not enforced</td></tr>
+  <tr><td>Modify a resting order</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Cancel a resting order</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Stop Loss / Target</td><td class="yes">Yes</td>
+      <td class="yes">Yes — enforced by this app, not resting at the exchange</td></tr>
+  <tr><td>Trailing Stop Loss</td><td class="yes">Yes</td>
+      <td class="yes">Yes — same caveat</td></tr>
+  <tr><td>Max position / session limits</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td><strong>Adjust lots on a position</strong></td><td class="yes">Yes</td><td class="no">No — use the chain / partial exits</td></tr>
+  <tr><td><strong>Roll a position</strong></td><td class="yes">Yes</td><td class="yes">Yes — two sequenced orders, see below</td></tr>
+  <tr><td><strong>Auto Hedge a short</strong></td><td class="no">No</td><td class="yes">Yes — on the confirmed fill</td></tr>
+  <tr><td><strong>Kill-switch (halt new entries)</strong></td><td class="yes">Yes</td><td class="yes">Yes — survives a restart</td></tr>
 </table>
 
 <h2>The specific risks</h2>
 
-<h3>1. Nothing exits a live position automatically</h3>
+<h3>1. A live stop only exists while Charticks is running</h3>
 <div class="box danger">
-  <p>You can type a Stop Loss or Target against a live position, but <strong>nothing
-  enforces it</strong>. The risk engine only watches paper positions. A live position has
-  <strong>no automatic protection at all</strong> — it will not exit on a stop, a target,
-  a trailing stop, or a portfolio trail.</p>
-  <p>Set your stops in your broker's terminal, or watch the position yourself.</p>
+  <p>Stop Loss, Target, Trailing Stop Loss and Portfolio Trail Profit <strong>do</strong>
+  act on live positions. But they are enforced <strong>inside this application</strong>,
+  which watches each tick and sends an exit order when a level is breached. Nothing is
+  resting at the exchange.</p>
+  <p>That means a closed app, a crashed PC, a dropped internet connection or a stalled
+  market-data feed leaves the position <strong>completely unprotected</strong>, with no
+  warning at the exchange.</p>
+  <p>For anything you cannot afford to watch, also place a stop in your broker's own
+  terminal. Note that if you do, and Charticks also exits, you may end up exiting
+  twice — check your broker positions after any automatic exit.</p>
+  <p><strong>This has been built but not yet proven on a live account.</strong> Treat
+  the first few sessions as a test: small size, and watch what it does.</p>
 </div>
 
-<h3>2. Roll shows something that did not happen</h3>
-<div class="box danger">
-  <p>If you use <strong>Roll</strong> on a <em>live</em> position, the app will display a
-  rolled position <strong>that does not exist at your broker</strong>. Nothing is sent. The
-  original position is untouched and reappears within a few seconds when the app next reads
-  your broker's book.</p>
-  <p><strong>Do not use Roll in Live mode.</strong> It works correctly in Paper.</p>
+<h3>2. Roll is two separate orders, and can leave you flat</h3>
+<div class="box warn">
+  <p><strong>Roll now sends real orders in Live mode.</strong> (In earlier builds it did
+  not: the app drew a rolled position that did not exist at the broker. That is fixed —
+  nothing appears in the grid until your broker reports it.)</p>
+  <p>A roll is <em>close the current strike, then buy the new one</em>, and the second leg
+  is only sent once your broker confirms the first has actually closed. That ordering is
+  deliberate — sending both at once would double your position whenever the exit failed —
+  but it has a consequence you should know about:</p>
+  <p>If the closing leg fills and the new leg is then <strong>refused</strong> (margin,
+  a limit, a broker error), you end up <strong>flat</strong> rather than rolled. Charticks
+  says so loudly in the Activity log, but it does not retry: re-entering after a rejection
+  is your decision, not the app's. Check the Positions grid after any roll.</p>
+  <p>If the closing leg never confirms within 90 seconds the roll is abandoned and the new
+  leg is <em>not</em> opened — you keep the position you had.</p>
 </div>
 
-<h3>3. A resting live order cannot be changed or cancelled</h3>
-<p>A live LIMIT order that has not filled yet sits at your broker, and the app offers no way
-to re-price or cancel it. <strong>Use your broker's terminal for that.</strong> Working live
-orders are also not shown in the Positions grid — a position appears only once the order
-actually fills.</p>
+<h3>3. Resizing a split order</h3>
+<p>A resting live order can now be re-priced or cancelled from the app. Two caveats:</p>
+<p>If an order was too large for one submission, Charticks split it into several broker
+orders. You can change the <em>price</em> of those (every leg is amended) and you can
+cancel them (every leg is cancelled), but you <strong>cannot change the quantity</strong> —
+one new quantity has no single meaning across legs. Cancel it and place the size you want.</p>
+<p>A position appears in the grid only once the order actually fills, so a working order is
+visible in the Order Book rather than the Positions grid.</p>
 
-<h3>4. Position and trade limits do not apply in Live</h3>
-<p>Max Position, max trades and max loss are checked against the paper book, so they do not
-restrain live orders. Size your live trades manually.</p>
+<h3>4. Duplicate protection may ask before it sends</h3>
+<p>Max Position, max trades and max loss now restrain live orders as well as paper ones —
+they are enforced by the engine, not the screen.</p>
+<p>Charticks also refuses to send the same order twice by accident. If you place an
+identical order within two minutes of the last one, it is <strong>held</strong> and you are
+asked to confirm — that is deliberate, not a fault. And if a previous attempt was sent but
+the broker never answered, it will not resend until it has checked; if it cannot check, it
+asks you to look at your broker's order book first. Both prompts let you go ahead.</p>
 
 <h3>5. A live position takes a few seconds to appear</h3>
 <p>Live positions are read from your broker roughly every 4 seconds, so a filled order shows
 up shortly after — not instantly like Paper. The green “Order accepted” confirmation appears
 immediately with the broker's order id; the position row follows.</p>
 
+<h3>6. Closing a position keeps it in one row</h3>
+<p>A square-off is shown as a state of the position, not as a second row. When you close (or
+partially close) a position, or a Stop Loss / Target fires, that row switches to
+<strong>⏳ Exit Pending</strong> and its controls lock — no editing, no Roll, no further
+partial exits — until your broker answers. It then either disappears (filled) or returns to
+normal (refused). Working <em>entry</em> orders still appear in the Order Book until they
+fill, because until then there is no position for them to be a state of.</p>
+
 <h2>Broker support</h2>
 
 <table>
-  <tr><th>Broker</th><th>Market data</th><th>Live entry</th><th>Live close</th></tr>
-  <tr><td>Angel One</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
-  <tr><td>ICICI Direct (Breeze)</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="no">Not yet</td></tr>
-  <tr><td>Kotak Neo</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
-  <tr><td>Dhan</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
+  <tr><th>Broker</th><th>Market data</th><th>Live entry</th><th>Live close</th><th>Modify / cancel</th></tr>
+  <tr><td>Angel One</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>ICICI Direct (Breeze)</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Kotak Neo</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
+  <tr><td>Dhan</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td><td class="yes">Yes</td></tr>
 </table>
 
-<p><strong>Closing from the app is Angel-only in this build.</strong> An ICICI live position
-must be closed in ICICI's own terminal.</p>
-
-<p>Kotak and Dhan will connect and stream prices, but a live order returns
-<em>“Live order routing for &lt;broker&gt; is not available yet.”</em> Nothing is sent.</p>
+<div class="box warn">
+  <p>All four brokers now place, close, modify and cancel live orders. <strong>Angel One is
+  the only one of the four that has been exercised against a real account.</strong> Kotak,
+  ICICI and Dhan are newly wired and unproven — start with one lot and check the order in
+  your broker's own terminal before trusting it with size.</p>
+</div>
 
 <h2>Other things to know</h2>
 
@@ -140,15 +179,58 @@ your machine's public IP is registered on your own SmartAPI app. On mobile tethe
 CGNAT connection your IP changes without warning, which breaks order placement mid-session.
 See <a href="BROKER-SETUP.html">BROKER-SETUP.html</a>.</p>
 
-<h3>There is no exchange holiday calendar</h3>
-<p>On a trading holiday the app still believes the market is open between 09:15 and 15:30 IST
-and will let you submit an order. Your broker rejects it. The app is not wrong about the
-clock, it simply does not know the holiday list.</p>
+<h3>The holiday calendar is a file, and it is only as current as you keep it</h3>
+<p>Charticks now knows the exchange trading holidays and refuses orders on one, naming the
+holiday. The dates live in <code>resources/sidecar/config/market_holidays.json</code> and
+are seeded for 2026 only. <strong>They must be refreshed each year</strong> from the NSE
+and MCX circulars. If the file is missing, unreadable or out of date, the app falls back to
+treating every weekday as a trading day — the old behaviour — and your broker rejects the
+order instead.</p>
+<p>Half-days and special sessions (Muhurat, an MCX evening-only session on an equity
+holiday) are not modelled. Your broker remains the authority on the exact minute.</p>
 
-<h3>Nothing is saved when the app restarts</h3>
-<p>Paper positions, order history and any Stop Loss / Target you configured are held in
-memory only. Closing the app or restarting the engine clears them. Real broker positions are
-unaffected — they live at the broker and reappear when the app reconnects.</p>
+<h3>Paper positions are not saved when the app restarts</h3>
+<p>Paper positions and order history are held in memory only; closing the app or restarting
+the engine clears them.</p>
+<p><strong>Live positions are different.</strong> The live book — including every Stop Loss,
+Target and Trailing Stop — is written to disk on every change and restored on restart. It is
+then re-confirmed against your broker's own position book before any automation acts on it,
+so a stop is never fired against a position that was closed while Charticks was not running.</p>
+
+<h3>Quitting stops your stops — and now says so</h3>
+<p>Because live stops are enforced by this app, closing it removes them. Charticks now warns
+before it closes if it is managing live positions, and lists them. It does not square them
+off for you: closing your book is your decision. If you quit anyway, your broker still holds
+the positions and nothing is watching them.</p>
+
+<h3>Adjusting lots on a live position is not supported</h3>
+<p>The <strong>AdjLots</strong> control works in Paper only. To add to a live position, buy
+or sell it again from the Option Chain; to reduce it, use the partial-exit buttons. Both
+place real broker orders. (In Live mode the control is absent rather than inert.)</p>
+
+<h3>Notifications are saved but not raised</h3>
+<p>The Notifications card in Settings stores your preferences and is marked "not yet active":
+this version raises no desktop or sound alerts. Fills, modifications, SL / Target hits and
+connection changes all appear in the Activity log and in <code>logs/orders.log</code>.</p>
+
+<h3>A hedge belongs to the trade it protects</h3>
+<p>An automatic hedge is not treated as a separate trade. Charticks records which
+short it was opened for, and the Positions grid labels both sides
+(<strong>🛡 Hedge</strong> on the protective leg, <strong>🛡 Hedged</strong> on the short).
+The link is saved to disk, so it survives a restart.</p>
+<p>When the last short a hedge was protecting closes — whether you closed it here or in
+your broker's own app — Charticks <strong>asks</strong> whether to close the hedge or keep
+it. It never decides for you: closing it is an exit you did not request, and keeping it
+silently leaves a long position you did not choose to hold on its own. If the same hedge is
+covering more than one short, closing one of them changes nothing and you are not asked.</p>
+
+<h3>Auto Hedge protects a short, and reports it when it cannot</h3>
+<p>With Auto Hedge on, a confirmed short fill is followed by a protective long leg the
+configured distance further out of the money. It is placed by the engine on the
+<em>fill</em> (not on the order being accepted) and carries <strong>no stop of its own</strong>
+— a stop on a hedge would take the protection off and leave the short naked. If the hedge
+cannot be placed, the Activity log says so as an error and the short is left plainly
+unhedged; it is never silently skipped.</p>
 
 <h3>Closing an ICICI session key expires daily</h3>
 <p>ICICI issues a session key by browser login that dies each day. Reconnect that account

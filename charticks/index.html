@@ -3,9 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      connect-src allows any port on the LOOPBACK ADDRESS only.
+
+      It used to pin 127.0.0.1:8787. The sidecar now binds a free port chosen at
+      launch, because a fixed one collides with a stale engine, a development
+      server or a second copy of the app — and a collision left the application
+      permanently unusable with no explanation. A pinned port here would have
+      silently blocked every request to the new one.
+
+      This is not a loosening worth worrying about: 127.0.0.1 is unreachable
+      from off the machine, the sidecar is bearer-token guarded, and no other
+      origin is permitted at all.
+    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' ws://127.0.0.1:8787 http://127.0.0.1:8787; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+      content="default-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
     />
     <title>Charticks — Execution Terminal</title>
   </head>

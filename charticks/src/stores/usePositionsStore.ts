@@ -1,7 +1,7 @@
 import { create } from "zustand";
-import { INDEX_BY_ID } from "@/lib/indices";
 import { type RiskRule, type TrailRule } from "@/lib/risk";
 import { bridge } from "@/bridge/client";
+import { lotSizeOf } from "@/stores/useContractSpecs";
 
 // Paper positions are owned by the sidecar paper engine (services/paper_engine.py)
 // and streamed here via the `paper_state` event (see startPaperSync). They mark to
@@ -41,8 +41,15 @@ export interface OptionPosition {
   status: "OPEN" | "CLOSED";
 }
 
+/** Lot size for an underlying.
+ *
+ *  Delegates to the engine's instrument master (useContractSpecs), falling back
+ *  to the shipped table only while no master is loaded. This used to read the
+ *  table directly, which meant an exchange lot-size revision silently made every
+ *  order for that index fail the sidecar's lot-size check until a new build
+ *  shipped. Kept as this name because every call site already uses it. */
 export function lotSize(underlying: string): number {
-  return INDEX_BY_ID[underlying]?.lot || 1;
+  return lotSizeOf(underlying);
 }
 
 export function qtyOf(p: OptionPosition): number {

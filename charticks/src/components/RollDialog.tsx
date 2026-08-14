@@ -41,6 +41,15 @@ export function RollDialog({
   const strikeBand = useGridPrefsStore((s) => s.strikeBand);
   const watch = useLiveChain((s) => s.watch);
   const quotes = useLiveChain((s) => s.snapshot.watch);
+  // The chain the user is already looking at. Roll candidates sit close to the
+  // position, so most of them are inside that window and are ALREADY streaming
+  // — reading their price from here means the dialog is populated the instant it
+  // opens instead of waiting for its own subscription to be set up and tick.
+  // Only used when the chain is on the same contract series, and only until the
+  // dedicated watch quote arrives, which then takes over.
+  const chainRows = useLiveChain((s) => s.byStrike);
+  const chainSymbol = useLiveChain((s) => s.snapshot.symbol);
+  const chainExpiry = useLiveChain((s) => s.snapshot.expiry);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -75,8 +84,19 @@ export function RollDialog({
     return () => watch(position.underlying, position.expiry, position.optType, []);
   }, [watch, position.underlying, position.expiry, position.optType, strikeKey]);
 
-  const ltpFor = (strike: number): number | null =>
-    quotes.find((q) => q.strike === strike)?.ltp ?? null;
+  // The dedicated watch quote is authoritative once it exists; the live chain is
+  // the seed that stops the dialog opening empty. Both are the real contract's
+  // own premium — neither is derived or modelled — so switching from one to the
+  // other cannot change the number the user is looking at.
+  const sameSeries = chainSymbol === position.underlying
+    && (!position.expiry || chainExpiry === position.expiry);
+  const ltpFor = (strike: number): number | null => {
+    const watched = quotes.find((q) => q.strike === strike)?.ltp;
+    if (watched != null) return watched;
+    if (!sameSeries) return null;
+    const row = chainRows[strike];
+    return (position.optType === "CE" ? row?.ce : row?.pe) ?? null;
+  };
 
   const roll = (newStrike: number, premium: number | null) => {
     if (premium == null || premium <= 0) return; // never roll on an unknown price

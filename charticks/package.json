@@ -45,7 +45,7 @@
       {
         "from": "../sidecar",
         "to": "sidecar",
-        "filter": ["**/*", "!__pycache__/**", "!**/__pycache__/**", "!*.pyc", "!**/*.pyc", "!logs/**", "!**/*.log", "!data_cache/**"]
+        "filter": ["**/*", "!logs/**", "!**/*.log", "!data_cache/**", "!tests/**"]
       }
     ],
     "win": { "target": "nsis" }

@@ -22,7 +22,35 @@ def tick(token: str, ltp: float, volume: int) -> dict:
 
 
 def position_update(pos: dict) -> dict:
+    """One live or paper position. Beyond price and size it carries whether the
+    position is actually being MANAGED and MONITORED right now (`managed`,
+    `monitorState`, `monitorDetail`, `source`) — the renderer must never draw an
+    unprotected position the same way as a protected one."""
     return {"type": "position_update", **pos}
+
+
+def monitor_alarm(active: bool, positions: list) -> dict:
+    """Raised whenever Charticks cannot actively protect a position it is
+    displaying — feed lost, subscription missing, automation paused, a broker
+    position nobody is managing. Stays active until monitoring resumes; the
+    renderer surfaces it as a persistent banner rather than a toast, because the
+    danger lasts as long as the condition does."""
+    return {"type": "monitor_alarm", "active": active, "positions": positions,
+            "ts": _now_ms()}
+
+
+def hedge_orphaned(hedge_id: str, symbol: str, qty: int, lots: int,
+                   parent: str, pnl: float) -> dict:
+    """The last short a protective hedge was covering has closed.
+
+    A decision only the user can make, so it is asked rather than assumed:
+    closing the hedge automatically is an exit nobody requested, and keeping it
+    silently leaves a long position they never intended to hold on its own. The
+    hedge stays exactly as it is until they answer.
+    """
+    return {"type": "hedge_orphaned", "hedgeId": hedge_id, "symbol": symbol,
+            "qty": qty, "lots": lots, "parent": parent, "pnl": pnl,
+            "ts": _now_ms()}
 
 
 def pnl_update(net_pnl: float) -> dict:

@@ -7,6 +7,10 @@ Run: python -m uvicorn server:app --host 127.0.0.1 --port 8787
 """
 from __future__ import annotations
 
+# FIRST, before anything expensive: this module's T0 is the origin every other
+# sidecar phase is measured from. See startup_profile.py.
+import startup_profile
+
 import asyncio
 import os
 
@@ -16,20 +20,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import diagnostics
+from bridge import events
 from bridge.hub import hub
 from services import market_session
 from services import simulator
 from services.broker_manager import manager as broker_manager
 from services import market_data
+from services.hedge import hedge_manager
 from services.idempotency import store as idempotency_store
 from services.instruments import instruments
 from services.kill_switch import kill_switch
 from services.live_book import live_book
 from services.live_manager import live_manager
+from services.live_store import live_store
 from services.order_manager import order_manager
 from services.order_sync import order_sync
 from services.paper_engine import paper_engine
+from services.position_reconciler import reconciler
 from services.risk_engine import risk_engine
+from services.subscriptions import option_subs
+
+startup_profile.mark("imports-complete")
 
 BRIDGE_TOKEN = os.environ.get("CHARTICKS_BRIDGE_TOKEN", "dev")
 
@@ -55,13 +66,37 @@ app.add_middleware(
 )
 
 
+@app.get("/startup-profile")
+async def startup_profile_state(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Where this process spent its start-up, in ms from its own T0.
+
+    Folded into the cross-process timeline by the Electron main process, which
+    knows when it spawned us. See charticks/electron/startup.ts.
+    """
+    _check_bearer(authorization)
+    return JSONResponse({"phases": startup_profile.phases(),
+                         "uptimeMs": round(startup_profile.elapsed_ms(), 1)})
+
+
 @app.on_event("startup")
 async def _startup() -> None:
+    startup_profile.mark("asgi-startup-begin")
     diagnostics.install()  # no-op if import-time install already ran
     hub.bind_loop(asyncio.get_running_loop())
     simulator.start()
-    # Live trade management subscribes to the shared tick feed. Idle unless the
-    # confirmed position book has something in it and the mode is live.
+    # Restore the persisted live position book BEFORE the manager starts, so
+    # the first evaluation cycle already knows what is held. Restored positions
+    # stay disarmed until the reconciler has matched them against the broker's
+    # own book — a stop must never fire against a position that was closed
+    # while Charticks was not running.
+    restored = reconciler.restore_and_start()
+    if restored.get("restored"):
+        hub.publish(events.log_line(
+            "warn", f"[positions] restored {restored['restored']} live position(s) "
+                    f"from disk — confirming with your broker before resuming "
+                    f"stop loss / target management"))
+    # Live trade management subscribes to the shared tick feed AND runs its own
+    # periodic evaluation cycle, so stops keep evaluating when ticks do not.
     live_manager.start()
     # asyncio swallows exceptions from tasks nobody awaits; route them to
     # exceptions.log rather than the default stderr print that goes nowhere in
@@ -70,6 +105,43 @@ async def _startup() -> None:
         lambda _loop, ctx: diagnostics.exception(
             "app", f"asyncio: {ctx.get('message', 'error')}",
             exc_info=ctx.get("exception") or False))
+    startup_profile.mark("ready")
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Write the live book down before the process goes.
+
+    Persistence is debounced onto a background thread, so up to half a second of
+    bookkeeping — most importantly a stop that has just trailed — is in memory
+    at any moment. On a clean exit there is no reason to lose it.
+    """
+    live_manager.stop()
+    order_sync.stop()
+    live_store.flush()
+    diagnostics.event("app", "Sidecar shutdown", "success",
+                      openPositions=len(live_book.open_positions()))
+
+
+@app.get("/shutdown-check")
+async def shutdown_check(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """What the user would be walking away from if they quit right now.
+
+    Every live stop loss, target and trail lives in this process, so quitting
+    while a managed position is open removes the only thing protecting it — and
+    the broker keeps the position. The main process asks this before closing and
+    makes the user confirm; it is not something to discover afterwards.
+    """
+    _check_bearer(authorization)
+    positions = live_book.open_positions()
+    managed = [p for p in positions if p.managed]
+    return JSONResponse({
+        "live": order_manager.mode == "live",
+        "openPositions": len(positions),
+        "managedPositions": len(managed),
+        "workingOrders": order_sync.snapshot().get("open", 0),
+        "symbols": [p.symbol for p in managed][:10],
+    })
 
 
 @app.exception_handler(Exception)
@@ -122,6 +194,10 @@ async def market_feed(authorization: str | None = Header(default=None)) -> JSONR
         "lastUnmappedToken": broker_manager.last_unmapped_token,
     }
     status["instrumentBindings"] = instruments.stats()
+    # What is subscribed and WHO asked for it. The chain is only one source:
+    # open live and paper positions declare their own contracts, and the union
+    # is what actually goes on the wire.
+    status["subscriptions"] = option_subs.status()
     # Per-feed detail. The top-level fields above stay as they were (the market
     # feed's own status) so existing readers are unaffected; this is additive,
     # and becomes the interesting half once a second broker streams.
@@ -136,6 +212,44 @@ async def option_chain(authorization: str | None = Header(default=None)) -> JSON
     # Live snapshot from the reused OptionChainEngine. Empty rows until an Angel
     # session is connected and streaming (honest — no mock fallback).
     return JSONResponse(market_data.option_chain.snapshot())
+
+
+@app.get("/market-session")
+async def market_session_state(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Whether the market is open, and the holiday calendar behind that answer.
+
+    The renderer mirrors the session rule so it can raise its dialog without a
+    round trip, but it cannot mirror a calendar it has never seen. Serving the
+    dates means the UI says "closed today — Republic Day" at the moment the user
+    clicks, instead of composing an order for the engine to reject.
+    """
+    _check_bearer(authorization)
+    today = market_session.now_ist().date()
+    return JSONResponse({
+        "openEquity": market_session.is_market_open(),
+        "openCommodity": market_session.is_market_open(symbol="CRUDEOIL"),
+        "holidayEquity": market_session.holiday_for(today),
+        "holidayCommodity": market_session.holiday_for(today, "CRUDEOIL"),
+        "date": today.isoformat(),
+        "serverTimeIst": market_session.now_ist().strftime("%H:%M:%S"),
+    })
+
+
+@app.get("/contract-specs")
+async def contract_specs(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Lot size and strike step per underlying, from the instrument master.
+
+    The renderer used to carry its own hard-coded table (`lib/indices.ts`) and
+    compute every order's quantity as `lots x that number`. Exchanges revise lot
+    sizes, and when one drifted the renderer sent a quantity that disagreed with
+    the contract: the sidecar's own lot-size rule then rejected every order for
+    that index with LOT_QTY_MISMATCH, and the only fix was a new build. The
+    master is the authority, so it is served from here and the table becomes a
+    fallback for indices the master has not loaded yet.
+    """
+    _check_bearer(authorization)
+    return JSONResponse({"specs": broker_manager.contract_specs(),
+                         "steps": market_data.strike_steps()})
 
 
 @app.post("/option-chain/select")
@@ -169,6 +283,19 @@ async def risk_config(body: dict, authorization: str | None = Header(default=Non
     re-pushes on every change and every reconnect (see useRiskSync)."""
     _check_bearer(authorization)
     return JSONResponse(risk_engine.set_config(body or {}))
+
+
+@app.post("/hedge-config")
+async def hedge_config(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Push the active profile's Auto Hedge config.
+
+    Enforced in the sidecar, on broker-confirmed fills — the renderer used to own
+    this end to end, so a hedge went in on "order accepted" (not on a fill) and
+    only while a window happened to be open. Re-sent on every change and every
+    reconnect, exactly like the risk config.
+    """
+    _check_bearer(authorization)
+    return JSONResponse(hedge_manager.set_config(body or {}))
 
 
 @app.post("/kill-switch")
@@ -213,6 +340,79 @@ async def live_book_state(authorization: str | None = Header(default=None)) -> J
     what Max Positions / Max Loss are actually evaluated against."""
     _check_bearer(authorization)
     return JSONResponse(live_book.snapshot())
+
+
+@app.get("/positions/monitor")
+async def positions_monitor(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Is every live position actually being watched right now?
+
+    The one place that answers it end to end: whether the management engine is
+    running, when it last completed a cycle, which positions are in an alarm
+    state and why, what is subscribed for market data, and how reconciliation
+    against the broker's book is going.
+    """
+    _check_bearer(authorization)
+    return JSONResponse({
+        "monitor": live_manager.monitor_status(),
+        "reconciliation": reconciler.status(),
+        "book": live_book.snapshot(),
+    })
+
+
+@app.post("/positions/adopt")
+async def positions_adopt(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Take over management of a position Charticks did not open.
+
+    The rule is applied against the broker's cost basis, so an adopted position
+    is managed on exactly the same terms as a native one. Explicit by design:
+    Charticks never assumes a position found at the broker is its own.
+    """
+    _check_bearer(authorization)
+    position_id = str(body.get("id", ""))
+    if not position_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    return JSONResponse(live_book.adopt(position_id, body.get("rule")))
+
+
+@app.post("/positions/ignore")
+async def positions_ignore(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Stop managing a position without closing it. It stays visible and is
+    plainly marked unmanaged — never hidden, because it is still real
+    exposure."""
+    _check_bearer(authorization)
+    position_id = str(body.get("id", ""))
+    if not position_id:
+        raise HTTPException(status_code=400, detail="id is required")
+    return JSONResponse(live_book.release(position_id))
+
+
+@app.post("/positions/hedge-decision")
+async def positions_hedge_decision(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Answer the "your hedge is now on its own" question.
+
+    `action` is "close" or "keep". Charticks does neither by itself: closing is
+    an exit the user did not ask for, keeping is a position they did not choose
+    to hold alone. See services/hedge.py.
+    """
+    _check_bearer(authorization)
+    hedge_id = str(body.get("hedgeId", ""))
+    action = str(body.get("action", "")).lower()
+    if not hedge_id or action not in ("close", "keep"):
+        raise HTTPException(status_code=400,
+                            detail="hedgeId and action ('close'|'keep') are required")
+    if action == "close":
+        pos = live_book.get(hedge_id)
+        if closed := market_session.require_open(pos.underlying if pos else None):
+            return JSONResponse(closed)
+    return JSONResponse(await run_in_threadpool(
+        hedge_manager.resolve_orphan, hedge_id, action))
+
+
+@app.post("/positions/reconcile")
+async def positions_reconcile(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Force an immediate read of every broker's position book."""
+    _check_bearer(authorization)
+    return JSONResponse(await run_in_threadpool(reconciler.reconcile_once))
 
 
 @app.post("/orders/place")
@@ -295,16 +495,37 @@ async def paper_state(authorization: str | None = Header(default=None)) -> JSONR
 @app.post("/positions/close")
 async def positions_close(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_bearer(authorization)
-    if closed := market_session.require_open(paper_engine.underlying_of(str(body.get("id", "")))):
+    position_id = str(body.get("id", ""))
+    fraction = float(body.get("fraction", 1.0))
+    # Live positions are closed by the live manager (a real broker exit); paper
+    # positions by the paper engine. Routing everything to the paper engine, as
+    # this did, meant a close on a live position silently did nothing.
+    if order_manager.mode == "live":
+        pos = live_book.get(position_id)
+        if closed := market_session.require_open(pos.underlying if pos else None):
+            return JSONResponse(closed)
+        return JSONResponse(await run_in_threadpool(
+            live_manager.close_position, position_id, fraction))
+    if closed := market_session.require_open(paper_engine.underlying_of(position_id)):
         return JSONResponse(closed)
-    result = await run_in_threadpool(
-        paper_engine.close_position, str(body.get("id", "")), float(body.get("fraction", 1.0)))
+    result = await run_in_threadpool(paper_engine.close_position, position_id, fraction)
     return JSONResponse(result)
 
 
 @app.post("/positions/adjust")
 async def positions_adjust(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_bearer(authorization)
+    if order_manager.mode == "live":
+        # Adjusting lots on a live position is not implemented. Routing it to the
+        # paper engine, as this did, meant the request found no such position and
+        # returned quietly — a control that appeared to work and did nothing. Say
+        # so instead: add or reduce through the option chain and the partial-exit
+        # buttons, both of which place real orders.
+        return JSONResponse({
+            "ok": False, "code": "NOT_SUPPORTED_LIVE",
+            "error": "Adjusting lots on a live position is not supported. Use the "
+                     "option chain to add, or the partial-exit buttons to reduce — "
+                     "both place real broker orders."})
     if closed := market_session.require_open(paper_engine.underlying_of(str(body.get("id", "")))):
         return JSONResponse(closed)
     result = await run_in_threadpool(
@@ -319,12 +540,23 @@ async def positions_risk(body: dict, authorization: str | None = Header(default=
     target = body.get("target")
     trail_after = body.get("trailAfter")
     trail_step = body.get("trailStep")
-    result = await run_in_threadpool(
-        paper_engine.set_risk, str(body.get("id", "")),
+    position_id = str(body.get("id", ""))
+    args = (
         float(sl) if sl is not None else None,
         float(target) if target is not None else None,
         float(trail_after) if trail_after is not None else None,
-        float(trail_step) if trail_step is not None else None)
+        float(trail_step) if trail_step is not None else None,
+    )
+    # Whichever book owns the position owns its risk state. Live edits used to
+    # be routed to the paper engine, which simply did not have the position —
+    # so the edit silently did nothing while the UI showed the new number.
+    if order_manager.mode == "live":
+        ok = await run_in_threadpool(live_book.set_risk, position_id, *args)
+        if not ok:
+            return JSONResponse({"ok": False, "code": "NO_POSITION",
+                                 "error": "That live position is no longer open."})
+        return JSONResponse({"ok": True})
+    result = await run_in_threadpool(paper_engine.set_risk, position_id, *args)
     return JSONResponse(result)
 
 
@@ -342,11 +574,26 @@ async def portfolio_trail(body: dict, authorization: str | None = Header(default
 
 @app.post("/positions/roll")
 async def positions_roll(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Move a position to another strike on the same series.
+
+    Live rolls are REAL orders, sequenced by the live manager: close the current
+    leg, and open the new one only once the broker confirms the close. This used
+    to be routed to the paper engine regardless of mode, so a live position's
+    roll found nothing to act on — while the renderer separately faked the
+    result in its own store and showed a rolled position that did not exist.
+    """
     _check_bearer(authorization)
-    if closed := market_session.require_open(paper_engine.underlying_of(str(body.get("id", "")))):
+    position_id = str(body.get("id", ""))
+    if order_manager.mode == "live":
+        pos = live_book.get(position_id)
+        if closed := market_session.require_open(pos.underlying if pos else None):
+            return JSONResponse(closed)
+        return JSONResponse(await run_in_threadpool(
+            live_manager.roll_position, position_id, int(body.get("newStrike", 0))))
+    if closed := market_session.require_open(paper_engine.underlying_of(position_id)):
         return JSONResponse(closed)
     result = await run_in_threadpool(
-        paper_engine.roll, str(body.get("id", "")),
+        paper_engine.roll, position_id,
         int(body.get("newStrike", 0)), float(body.get("newEntry", 0)))
     return JSONResponse(result)
 
@@ -453,6 +700,14 @@ async def stream(ws: WebSocket) -> None:
             await ws.send_json(event)
         for event in simulator.snapshot_events():
             await ws.send_json(event)
+        # Position events are DELTAS, so a reloaded window would show an empty
+        # book until the next tick — indistinguishable from holding nothing.
+        # Republishing on connect is what makes a restored position visible
+        # immediately after a restart, warning badge and all. The alarm is
+        # replayed for the same reason: it is published on transitions, and a
+        # window that reloads mid-alarm must not come back looking calm.
+        live_book.republish()
+        live_manager.republish_alarm()
         while True:
             event = await q.get()
             await ws.send_json(event)

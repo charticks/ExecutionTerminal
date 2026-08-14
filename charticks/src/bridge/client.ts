@@ -26,6 +26,17 @@ class BridgeClient {
   async connect() {
     this.cfg = await resolveConfig();
     this.closed = false;
+    // The sidecar's port is chosen at launch and re-chosen if it has to be
+    // restarted, so a cached config can go stale mid-session. The main process
+    // says when that happens; without this the client would keep dialling a
+    // port nothing is listening on and never recover.
+    onConfigChanged(() => {
+      void (async () => {
+        this.cfg = await resolveConfig();
+        this.backoff = 500;
+        this.ws?.close();     // onclose schedules the reconnect on the new port
+      })();
+    });
     this.openSocket();
   }
 
@@ -108,15 +119,30 @@ class BridgeClient {
  * When running the renderer in a plain browser (vite dev without Electron),
  * fall back to the default localhost sidecar so the UI still streams.
  */
+interface CharticksApi {
+  getBridgeConfig?(): Promise<BridgeConfig>;
+  onBridgeConfigChanged?(cb: () => void): () => void;
+}
+
+function api(): CharticksApi | undefined {
+  return (window as unknown as { charticks?: CharticksApi }).charticks;
+}
+
 async function resolveConfig(): Promise<BridgeConfig> {
-  const api = (window as unknown as { charticks?: { getBridgeConfig(): Promise<BridgeConfig> } })
-    .charticks;
-  if (api?.getBridgeConfig) return api.getBridgeConfig();
+  const bridgeApi = api();
+  if (bridgeApi?.getBridgeConfig) return bridgeApi.getBridgeConfig();
+  // Plain browser (vite dev without Electron): the dev sidecar runs on the
+  // fixed port with the fixed token.
   return {
     restUrl: "http://127.0.0.1:8787",
     wsUrl: "ws://127.0.0.1:8787/stream",
     token: "dev",
   };
+}
+
+/** The main process re-chose the sidecar's port. */
+function onConfigChanged(cb: () => void): void {
+  api()?.onBridgeConfigChanged?.(cb);
 }
 
 export const bridge = new BridgeClient();

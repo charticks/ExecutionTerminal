@@ -1,13 +1,22 @@
 .app {
   display: grid;
   grid-template-columns: 56px 1fr;
-  grid-template-rows: 56px 1fr;
+  /* header · global status bar · page content.
+   *
+   * The middle row is `auto`, so it is exactly as tall as the global status bar
+   * and collapses to nothing when that bar is absent — which is what keeps the
+   * page content from moving as startup finishes. Every child below is placed
+   * EXPLICITLY: the status bar previously spanned `1 / -1` with no row of its
+   * own, so it claimed the `1fr` content row and pushed the page into an
+   * implicit third row, which is how it ended up floating in the middle of the
+   * screen with a blank band above it. */
+  grid-template-rows: 56px auto 1fr;
   height: 100vh;
 }
 
 /* ---- Rail ---- */
 .rail {
-  grid-row: 1 / 3;
+  grid-row: 1 / -1;
   background: var(--bg-rail);
   border-right: 1px solid var(--border);
   display: flex;
@@ -37,7 +46,8 @@
 
 /* ---- Status bar ---- */
 .status {
-  grid-column: 2; display: flex; align-items: center; gap: 16px; padding: 0 16px;
+  grid-column: 2; grid-row: 1;
+  display: flex; align-items: center; gap: 16px; padding: 0 16px;
   background: var(--panel); border-bottom: 1px solid var(--border);
 }
 .bridge { display: flex; align-items: center; gap: 7px; }
@@ -228,7 +238,7 @@
 .seg button.on { color: var(--accent); background: var(--accent-soft); }
 
 /* ---- Workspace ---- */
-.work { grid-column: 2; overflow: hidden; padding: var(--gap); min-height: 0; display: flex; }
+.work { grid-column: 2; grid-row: 3; overflow: hidden; padding: var(--gap); min-height: 0; display: flex; }
 .work > * { flex: 1; min-width: 0; min-height: 0; }
 .empty { padding: 24px; color: var(--text-faint); font-size: 12px; }
 .muted { color: var(--text-faint); }
@@ -424,6 +434,126 @@
 .pos-grid .c-inst .sym,
 .pos-grid .c-inst .sub { white-space: nowrap; }
 .closed-tag { margin-left: 8px; }
+
+/* ---- Position monitoring state ----
+   A position Charticks is not actively protecting must never read like one it
+   is, so the badge is mandatory on every live row and the alarm variants are
+   deliberately loud. */
+.mon-badge {
+  margin-left: 8px; font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.05em; padding: 1px 6px; border-radius: 20px;
+  border: 1px solid var(--border); color: var(--text-faint); white-space: nowrap;
+}
+.mon-badge.ok { color: var(--up); border-color: var(--up); background: var(--up-bg); }
+.mon-badge.info { color: var(--text-dim); }
+.mon-badge.warn { color: var(--amber, #f5a623); border-color: var(--amber, #f5a623); }
+/* An exit is at the broker. The row stays in place and stays readable — it is
+   the same position, mid-transition — but is visibly inert, because none of its
+   controls will do anything until the broker answers. */
+.mon-badge.pending {
+  background: color-mix(in srgb, var(--warn, #e0a800) 18%, transparent);
+  color: var(--warn, #e0a800);
+  border-color: color-mix(in srgb, var(--warn, #e0a800) 45%, transparent);
+}
+/* ---- Global startup status bar ----
+ *
+ * A GLOBAL application status, not a page element: it lives in the app grid's
+ * own row directly under the header, so it appears identically on Home,
+ * Brokers, Settings and everywhere else, and can never overlap or displace what
+ * a page is drawing. Modelled on an IDE's background-task strip rather than a
+ * notification banner — the app is fully usable the whole time it is showing,
+ * and covering a usable interface to look busy would defeat the point.
+ *
+ * Fixed height, so nothing reflows while the steps change; it collapses that
+ * height back to the page once startup finishes. */
+.boot-status {
+  grid-column: 2; grid-row: 2;
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 18px;
+  height: 30px; padding: 0 16px;
+  /* nowrap + hidden keeps the height fixed no matter how long the detail text
+     gets — a wrapping strip would resize the row and move the page. */
+  overflow: hidden; white-space: nowrap;
+  font-size: 11px; letter-spacing: .01em;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-faint);
+  transition: height .22s ease, opacity .22s ease;
+}
+/* Collapsing to zero returns the row to the page. Animated rather than
+   unmounted outright so the content below settles rather than jumping. */
+.boot-status.collapsing {
+  height: 0; opacity: 0; border-bottom-color: transparent;
+}
+.boot-step { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.boot-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-faint); flex: none;
+}
+.boot-step.busy { color: var(--text); }
+.boot-step.busy .boot-dot {
+  background: var(--accent);
+  animation: boot-pulse 1.2s ease-in-out infinite;
+}
+.boot-step.done { color: var(--text-faint); }
+.boot-step.done .boot-dot { background: var(--up); animation: none; }
+.boot-step.blocked { color: var(--text-dim); }
+.boot-step.blocked .boot-dot { background: var(--amber); animation: none; }
+/* The reason is shown for the CURRENT step only (see BootStatus.tsx) — four
+   simultaneous explanations was the clutter this replaced. */
+.boot-why { color: var(--text-faint); }
+@keyframes boot-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
+@media (prefers-reduced-motion: reduce) {
+  .boot-step.busy .boot-dot { animation: none; }
+  .boot-status { transition: none; }
+}
+
+/* Hedge relationship. Deliberately quiet — it is context, not an alarm — but
+   always present, so a protective leg is never mistaken for a trade of its own. */
+.hedge-tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; font-weight: 700; letter-spacing: .02em;
+  padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.hedge-tag.child {
+  background: color-mix(in srgb, var(--accent, #22d3ee) 12%, transparent);
+  color: var(--accent, #22d3ee);
+  border-color: color-mix(in srgb, var(--accent, #22d3ee) 35%, transparent);
+}
+.hedge-tag.parent { background: transparent; color: var(--text-dim); }
+
+.exiting-row { opacity: .72; }
+.exiting-row .c-num, .exiting-row .c-pnl { font-style: italic; }
+.close-pending {
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  color: var(--text-dim); white-space: nowrap;
+}
+
+.mon-badge.alarm {
+  color: #fff; border-color: var(--down); background: var(--down);
+}
+/* The whole row is tinted, not just the badge: at a glance down the grid the
+   unprotected rows have to separate from the protected ones. */
+.pos-grid tr.unmanaged-row { background: var(--down-bg); }
+
+.mon-alarm {
+  padding: 8px 14px; border-bottom: 1px solid var(--down);
+  background: var(--down-bg); color: var(--text); font-size: 11.5px;
+}
+.mon-alarm-head { font-weight: 800; color: var(--down); margin-bottom: 3px; }
+.mon-alarm ul { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.mon-alarm li { color: var(--text-dim); }
+.mon-alarm li b { color: var(--text); }
+
+.unprotected-count { font-size: 11px; color: var(--down); white-space: nowrap; }
+.unprotected-count b { font-size: 12.5px; }
+
+.adoptb {
+  padding: 3px 8px; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent-soft); font-size: 10px; font-weight: 700;
+  color: var(--accent); white-space: nowrap;
+}
+.adoptb:hover { filter: brightness(1.15); }
 /* An engine-enforced exit reads differently from a manual close. */
 .closed-tag.sl { color: var(--down); border-color: var(--down); }
 .closed-tag.target { color: var(--up); border-color: var(--up); }

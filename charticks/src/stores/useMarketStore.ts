@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { bridge } from "@/bridge/client";
-import type { BridgeEvent, BrokerHealth, BrokerId } from "@/bridge/events";
+import type {
+  BridgeEvent,
+  BrokerHealth,
+  BrokerId,
+  MonitorState,
+  PositionSource,
+} from "@/bridge/events";
 
 export interface IndexTile {
   symbol: string;
@@ -17,9 +23,47 @@ export interface Position {
   entry: number;
   ltp: number;
   pnl: number;
-  sl?: number;
-  target?: number;
+  sl?: number | null;
+  target?: number | null;
   tsl?: number;
+  underlying?: string;
+  expiry?: string;
+  strike?: number;
+  optType?: "CE" | "PE";
+  lots?: number;
+  /** Whether Charticks is enforcing this position's SL / Target / Trail right
+   *  now. A row with `managed === false` must never look like a managed one. */
+  managed?: boolean;
+  monitorState?: MonitorState;
+  monitorDetail?: string;
+  source?: PositionSource;
+  account?: string | null;
+  broker?: string | null;
+  /** An exit for this position is at the broker. The row shows "Exit Pending"
+   *  and locks its controls rather than a separate order row appearing. */
+  exitPendingQty?: number;
+  exitReason?: string | null;
+  /** The hedge covering this short, and — on a hedge — the shorts it covers. */
+  hedgedBy?: string | null;
+  hedgeFor?: string[] | null;
+}
+
+/** A hedge whose last protected short has closed, awaiting the user's decision. */
+export interface OrphanedHedge {
+  hedgeId: string;
+  symbol: string;
+  qty: number;
+  lots: number;
+  parent: string;
+  pnl: number;
+}
+
+/** One position Charticks currently cannot protect, as reported by the
+ *  sidecar's monitoring alarm. */
+export interface MonitorAlarmEntry {
+  id: string;
+  state: MonitorState;
+  detail: string;
 }
 
 export interface ParsedOption {
@@ -35,6 +79,20 @@ export interface ParsedOption {
  *  ("NIFTY 24900 CE"). Returns null for non-option symbols (nothing to roll). */
 export function parseOptionSymbol(symbol: string): ParsedOption | null {
   const raw = symbol.trim().toUpperCase();
+
+  // Canonical display form the sidecar's live book emits: "NIFTY 28AUG2026
+  // 25000 CE". Matched FIRST, because the looser two-part rule below would
+  // swallow the expiry into the underlying ("NIFTY 28AUG2026") and every
+  // lookup keyed on it — lot size, roll target, market session — would miss.
+  const full = /^([A-Z]+)\s+(\d{1,2}[A-Z]{3}\d{4})\s+(\d+(?:\.\d+)?)\s+(CE|PE)$/.exec(raw);
+  if (full) {
+    return {
+      underlying: full[1],
+      expiry: full[2],
+      strike: Number(full[3]),
+      optType: full[4] as "CE" | "PE",
+    };
+  }
 
   // Broker tradingsymbol: NAME + DDMMMYY + strike + CE/PE, no separators.
   const compact = /^([A-Z]+)(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$/.exec(raw);
@@ -67,12 +125,16 @@ interface MarketState {
   brokers: Record<BrokerId, BrokerHealth>;
   netPnl: number;
   riskHalted: boolean;
+  /** Positions the sidecar cannot currently protect. Empty when everything
+   *  open is being monitored. */
+  monitorAlarm: MonitorAlarmEntry[];
+  /** Hedges awaiting a Close / Keep decision. Queued rather than held one at a
+   *  time: squaring off several shorts at once can orphan several hedges, and
+   *  each is a separate decision that must not be lost. */
+  orphanedHedges: OrphanedHedge[];
+  dismissOrphanedHedge: (hedgeId: string) => void;
   ingest: (e: BridgeEvent) => void;
   setConnected: (c: boolean) => void;
-  /** Roll a live position to a new strike: close the current leg and open the
-   *  new-strike leg with the same side/qty. Mirrors the mock Roll Decider so the
-   *  feature works identically on the live book. */
-  rollPosition: (id: string, newStrike: number, premium: number) => void;
 }
 
 const HISTORY = 40;
@@ -84,28 +146,18 @@ export const useMarketStore = create<MarketState>((set) => ({
   brokers: { angel: "down", kotak: "down", dhan: "down", icici: "down" },
   netPnl: 0,
   riskHalted: false,
+  monitorAlarm: [],
+  orphanedHedges: [],
+  dismissOrphanedHedge: (hedgeId) =>
+    set((s) => ({ orphanedHedges: s.orphanedHedges.filter((h) => h.hedgeId !== hedgeId) })),
   setConnected: (connected) => set({ connected }),
-  rollPosition: (id, newStrike, premium) =>
-    set((s) => {
-      const src = s.positions[id];
-      if (!src) return {};
-      const parsed = parseOptionSymbol(src.symbol);
-      if (!parsed) return {};
-      const entry = +premium.toFixed(2);
-      const nid = `roll-${id}-${Date.now()}`;
-      const rolled: Position = {
-        id: nid,
-        symbol: `${parsed.underlying} ${newStrike} ${parsed.optType}`,
-        side: src.side,
-        qty: src.qty,
-        entry,
-        ltp: entry,
-        pnl: 0,
-      };
-      const positions = { ...s.positions, [nid]: rolled };
-      delete positions[id]; // close the rolled-from leg
-      return { positions };
-    }),
+  // There is deliberately no local `rollPosition` here any more. Rolling a live
+  // position is two real broker orders, sequenced by the sidecar (close, then
+  // open on confirmation) — see POST /positions/roll. This store used to fake
+  // it: it deleted the row and inserted a synthetic "rolled" position, so the
+  // user saw a roll that had never been sent while the original position sat
+  // untouched at the broker. A position grid must only ever show what the
+  // broker actually holds.
   ingest: (e) =>
     set((s) => {
       switch (e.type) {
@@ -119,8 +171,28 @@ export const useMarketStore = create<MarketState>((set) => ({
             },
           };
         }
-        case "position_update":
-          return { positions: { ...s.positions, [e.id]: { ...e } } };
+        case "position_update": {
+          const positions = { ...s.positions };
+          // A closed position is REMOVED, not kept at qty 0: the sidecar is the
+          // authority on what is open, and a lingering flat row is one more
+          // thing the trader has to work out the meaning of.
+          if (e.closed || e.qty <= 0) delete positions[e.id];
+          else positions[e.id] = { ...positions[e.id], ...e };
+          return { positions };
+        }
+        case "monitor_alarm":
+          return { monitorAlarm: e.active ? e.positions : [] };
+        case "hedge_orphaned": {
+          // De-duplicated by hedge id: a reconnect can replay the question, and
+          // asking twice about one hedge would be noise.
+          if (s.orphanedHedges.some((h) => h.hedgeId === e.hedgeId)) return {};
+          return {
+            orphanedHedges: [...s.orphanedHedges, {
+              hedgeId: e.hedgeId, symbol: e.symbol, qty: e.qty,
+              lots: e.lots, parent: e.parent, pnl: e.pnl,
+            }],
+          };
+        }
         case "pnl_update":
           return { netPnl: e.netPnl };
         case "broker_status":
