@@ -64,10 +64,16 @@ export function pnlOf(p: OptionPosition): number {
 
 interface PositionsState {
   positions: OptionPosition[];
+  /** The last refusal from the engine, for the grid to show. Empty when the last
+   *  action was accepted. These used to be swallowed, so a declined action was
+   *  indistinguishable from a broken control. */
+  lastError: string;
+  clearError: () => void;
   /** Replace the book from an engine snapshot (called by startPaperSync). */
   setFromSnapshot: (positions: OptionPosition[]) => void;
-  /** Add (delta>0, averages at LTP) or reduce lots — routed to the engine. */
-  adjustLots: (id: string, delta: number) => void;
+  /** Add (delta>0, averages at LTP) or reduce lots — routed to the engine.
+   *  Resolves to "" when accepted, or the reason it was not. */
+  adjustLots: (id: string, delta: number) => Promise<string>;
   /** Edit SL, Target and/or the trail parameters for a single position. Never
    *  touches any other position or the profile defaults. */
   setRisk: (
@@ -82,12 +88,37 @@ interface PositionsState {
   squareOffAll: () => void;
 }
 
+/** Fire-and-forget POST, for calls whose only outcome is a fresh snapshot. */
 const post = (path: string, body?: unknown) => bridge.post(path, body).catch(() => {});
+
+/** POST that SURFACES a refusal.
+ *
+ *  Every structural position action used to go through the silent helper above,
+ *  which swallowed `{ok: false, error}` along with any transport failure. The
+ *  engine would decline — over a position limit, a closed market, an
+ *  unsupported action — and the control simply did nothing, with no message
+ *  anywhere. "Adj Lots is not working" was that: the adjustment was being
+ *  refused and the refusal was being discarded.
+ */
+async function act(path: string, body?: unknown): Promise<string> {
+  try {
+    const res = await bridge.post<{ ok: boolean; error?: string }>(path, body);
+    return res.ok ? "" : (res.error || "The engine declined that action.");
+  } catch {
+    return "Could not reach the trading engine.";
+  }
+}
 
 export const usePositionsStore = create<PositionsState>((set) => ({
   positions: [],
+  lastError: "",
+  clearError: () => set({ lastError: "" }),
   setFromSnapshot: (positions) => set({ positions }),
-  adjustLots: (id, delta) => post("/positions/adjust", { id, delta }),
+  adjustLots: async (id, delta) => {
+    const error = await act("/positions/adjust", { id, delta });
+    set({ lastError: error });
+    return error;
+  },
   setRisk: (id, patch) => post("/positions/risk", { id, ...patch }),
   rollPosition: (id, newStrike, newEntry) =>
     post("/positions/roll", { id, newStrike, newEntry }),

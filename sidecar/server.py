@@ -386,6 +386,13 @@ async def positions_ignore(body: dict, authorization: str | None = Header(defaul
     return JSONResponse(live_book.release(position_id))
 
 
+@app.post("/positions/clear-history")
+async def positions_clear_history(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Forget this session's completed trades. Open positions are untouched."""
+    _check_bearer(authorization)
+    return JSONResponse(live_book.clear_history())
+
+
 @app.post("/positions/hedge-decision")
 async def positions_hedge_decision(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
     """Answer the "your hedge is now on its own" question.
@@ -515,18 +522,19 @@ async def positions_close(body: dict, authorization: str | None = Header(default
 @app.post("/positions/adjust")
 async def positions_adjust(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_bearer(authorization)
+    position_id = str(body.get("id", ""))
+    delta = int(body.get("delta", 0))
     if order_manager.mode == "live":
-        # Adjusting lots on a live position is not implemented. Routing it to the
-        # paper engine, as this did, meant the request found no such position and
-        # returned quietly — a control that appeared to work and did nothing. Say
-        # so instead: add or reduce through the option chain and the partial-exit
-        # buttons, both of which place real orders.
-        return JSONResponse({
-            "ok": False, "code": "NOT_SUPPORTED_LIVE",
-            "error": "Adjusting lots on a live position is not supported. Use the "
-                     "option chain to add, or the partial-exit buttons to reduce — "
-                     "both place real broker orders."})
-    if closed := market_session.require_open(paper_engine.underlying_of(str(body.get("id", "")))):
+        # Real orders now: adding places an entry for the extra lots, reducing is
+        # a partial exit of exactly that many. This used to route to the paper
+        # engine regardless of mode, so on a live position it looked up an id
+        # that book had never held and returned quietly.
+        pos = live_book.get(position_id)
+        if closed := market_session.require_open(pos.underlying if pos else None):
+            return JSONResponse(closed)
+        return JSONResponse(await run_in_threadpool(
+            live_manager.adjust_lots, position_id, delta))
+    if closed := market_session.require_open(paper_engine.underlying_of(position_id)):
         return JSONResponse(closed)
     result = await run_in_threadpool(
         paper_engine.adjust_lots, str(body.get("id", "")), int(body.get("delta", 0)))

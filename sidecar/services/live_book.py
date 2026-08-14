@@ -52,6 +52,10 @@ from services.live_store import live_store
 # the paper engine's own window so both modes behave the same way.
 DUPLICATE_WINDOW_S = 2.0
 
+# Completed trades kept for the session's history. A trading day is tens of
+# trades, so this is generous; the complete durable record is orders.log.
+CLOSED_HISTORY_LIMIT = 500
+
 # ── monitoring vocabulary ────────────────────────────────────────────────────
 # One position's monitoring state, computed by the live manager and mirrored in
 # charticks/src/bridge/events.ts MonitorState. A position is only safe in
@@ -123,6 +127,19 @@ class LivePosition:
     exit_pending_qty: int = 0
     exit_reason: str = ""
     exit_started_ts: float = 0.0
+    # ── closed-trade record ───────────────────────────────────────────────
+    # Filled in when the position closes, so the completed trade survives as
+    # history instead of vanishing. A live position used to be popped from the
+    # book and deleted from the grid the moment it went flat, leaving no record
+    # in the application of a trade that had just happened.
+    exit_price: float = 0.0
+    closed_ts: float = 0.0
+    realised: float = 0.0
+    # Quantity and lots actually closed out, accumulated across partial exits.
+    # `qty` is 0 by the time a position closes, so the history row would
+    # otherwise report a trade of size zero.
+    closed_qty: int = 0
+    closed_lots: int = 0
 
     # ── identity ──────────────────────────────────────────────────────────
     @property
@@ -165,14 +182,21 @@ class LivePosition:
             "accountId": self.account_id, "broker": self.broker,
             "product": self.product,
             "verifiedTs": self.verified_ts,
+            "exitPrice": self.exit_price, "closedTs": self.closed_ts,
+            "realisedPnl": self.realised, "closedQty": self.closed_qty,
+            "closedLots": self.closed_lots,
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "LivePosition | None":
+    def from_dict(cls, raw: dict, closed: bool = False) -> "LivePosition | None":
         """Rebuild a persisted position. Returns None for a row that cannot be
         trusted — a book we cannot fully parse must not produce a position with
         half its risk state, which would look managed and behave as if it had
-        no stop."""
+        no stop.
+
+        `closed` relaxes the quantity check, because a completed trade is
+        legitimately flat: its size lives in `closedQty`.
+        """
         try:
             underlying = str(raw["underlying"]).upper()
             expiry = str(raw["expiry"]).upper()
@@ -182,7 +206,9 @@ class LivePosition:
             side = str(raw["side"]).upper()
         except (KeyError, TypeError, ValueError):
             return None
-        if qty <= 0 or side not in ("BUY", "SELL") or opt_type not in ("CE", "PE"):
+        if side not in ("BUY", "SELL") or opt_type not in ("CE", "PE"):
+            return None
+        if qty <= 0 and not closed:
             return None
 
         def _opt_float(name: str) -> float | None:
@@ -211,6 +237,11 @@ class LivePosition:
             account_id=str(raw.get("accountId") or ""),
             broker=str(raw.get("broker") or ""),
             product=str(raw.get("product") or "NRML").upper(),
+            exit_price=float(raw.get("exitPrice") or 0.0),
+            closed_ts=float(raw.get("closedTs") or 0.0),
+            realised=float(raw.get("realisedPnl") or 0.0),
+            closed_qty=int(raw.get("closedQty") or 0),
+            closed_lots=int(raw.get("closedLots") or 0),
             # Deliberately NOT restored from the file. `verified_ts` means "the
             # broker confirmed this position exists" and is what arms
             # automation; a timestamp from before the restart is evidence about
@@ -247,6 +278,12 @@ class LiveBook:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._positions: dict[str, LivePosition] = {}
+        # Completed trades, newest last. Deliberately a SEPARATE list from the
+        # open book: everything that drives behaviour — automation, exposure
+        # limits, market-data subscriptions, reconciliation — reads
+        # `open_positions()`, and a closed trade appearing there would re-arm a
+        # stop on a position that no longer exists.
+        self._closed: list[LivePosition] = []
         self._orders_today = 0
         self._realised = 0.0
         # contract|side -> time last submitted, for the duplicate window.
@@ -257,6 +294,34 @@ class LiveBook:
     @staticmethod
     def key_for(underlying: str, expiry: str, strike: float, opt_type: str) -> str:
         return InstrumentKey.option(underlying, expiry, strike, opt_type).position_id
+
+    def _archive(self, pos: LivePosition) -> None:
+        """Keep a completed trade. Caller must hold the lock.
+
+        Bounded, because this is a session record and not an audit log — the
+        durable, complete history of what was sent to a broker is orders.log.
+        """
+        self._closed.append(pos)
+        if len(self._closed) > CLOSED_HISTORY_LIMIT:
+            del self._closed[:-CLOSED_HISTORY_LIMIT]
+
+    def closed_positions(self) -> list[LivePosition]:
+        """Completed trades this session, newest last."""
+        with self._lock:
+            return [copy(p) for p in self._closed]
+
+    def clear_history(self) -> dict:
+        """Forget completed trades. Open positions are untouched."""
+        with self._lock:
+            count = len(self._closed)
+            stale = list(self._closed)
+            self._closed.clear()
+        self._persist(immediate=True)
+        for pos in stale:
+            hub.publish(events.position_update(
+                {"id": f"closed:{pos.key}:{int(pos.closed_ts)}", "qty": 0,
+                 "disposition": "removed", "closed": True}))
+        return {"ok": True, "cleared": count}
 
     # ── persistence ───────────────────────────────────────────────────────
     def state(self) -> dict:
@@ -270,6 +335,10 @@ class LiveBook:
                               # ours: re-read on every startup rather than
                               # restored, so a stale one can never reappear.
                               if p.qty > 0 and p.source != SRC_EXTERNAL],
+                # Today's completed trades. Restored only for the SAME day, like
+                # the session counters — a restart mid-session must not lose the
+                # record of what has already been traded.
+                "closed": [p.to_dict() for p in self._closed],
             }
 
     def restore(self) -> dict:
@@ -294,12 +363,21 @@ class LiveBook:
                 continue
             restored.append(pos)
         same_day = state.get("sessionDate") == time.strftime("%Y-%m-%d")
+        closed_rows = state.get("closed")
+        closed: list[LivePosition] = []
+        if same_day and isinstance(closed_rows, list):
+            for raw in closed_rows:
+                pos = (LivePosition.from_dict(raw, closed=True)
+                       if isinstance(raw, dict) else None)
+                if pos is not None and pos.closed_ts:
+                    closed.append(pos)
         with self._lock:
             for pos in restored:
                 self._positions[pos.key] = pos
             if same_day:
                 self._orders_today = int(state.get("ordersToday") or 0)
                 self._realised = float(state.get("realised") or 0.0)
+                self._closed = closed[-CLOSED_HISTORY_LIMIT:]
         diagnostics.event(
             "orders", "Live book restore", "success" if not skipped else "partial",
             level="warn" if restored else "info",
@@ -376,18 +454,33 @@ class LiveBook:
             else:
                 closing = min(pos.qty, qty)
                 direction = 1 if pos.side == "BUY" else -1
-                self._realised += (price - pos.avg_entry) * closing * direction
+                trade_pnl = (price - pos.avg_entry) * closing * direction
+                self._realised += trade_pnl
+                pos.realised += trade_pnl
+                pos.closed_qty += closing
+                pos.closed_lots += lots
                 pos.qty -= closing
                 pos.lots = max(0, pos.lots - lots)
                 # This fill satisfied part (or all) of any in-flight exit.
                 pos.exit_pending_qty = max(0, pos.exit_pending_qty - closing)
                 changed = pos
                 if pos.qty <= 0:
+                    # Move to history rather than deleting. The position leaves
+                    # the OPEN book — automation, exposure limits and
+                    # subscriptions all read `open_positions()` and must not see
+                    # it again — but the completed trade is kept so the user has
+                    # a record of what they just did.
+                    pos.exit_price = price
+                    pos.closed_ts = time.time()
                     self._positions.pop(key, None)
+                    self._archive(pos)
                     closed = True
                     diagnostics.event("orders", "Live position closed", "success",
                                       symbol=pos.symbol,
                                       reason=pos.exit_reason or None,
+                                      entry=round(pos.avg_entry, 2),
+                                      exit=round(price, 2),
+                                      tradePnl=round(pos.realised, 2),
                                       realised=round(self._realised, 2))
         if closed:
             # The hedge that protected this short is no longer attached to
@@ -628,7 +721,8 @@ class LiveBook:
         self._publish(snapshot)
         return True
 
-    def _publish(self, pos: LivePosition, closed: bool = False) -> None:
+    def _publish(self, pos: LivePosition, closed: bool = False,
+                 disposition: str = "") -> None:
         """Push the position to the renderer.
 
         Deliberately the ONE publisher of live position rows: the broker
@@ -637,19 +731,41 @@ class LiveBook:
         being managed. Everything the renderer needs to distinguish a protected
         position from an unprotected one is carried here.
         """
+        # What the renderer should DO with this row. A closed-out trade of ours
+        # is archived into the closed list; anything else that has gone (a
+        # foreign leg that vanished, a position reconciliation dropped) is
+        # deleted. Both used to arrive as bare `closed: true`, so the grid could
+        # only delete — which is why a completed live trade left no record.
+        if not disposition:
+            disposition = "closed" if (closed and pos.closed_ts) else (
+                "removed" if closed else "open")
         hub.publish(events.position_update({
-            "id": pos.key,
+            "id": (f"closed:{pos.key}:{int(pos.closed_ts)}"
+                   if disposition == "closed" else pos.key),
+            "disposition": disposition,
+            # The completed trade, for the history row: entry and exit price,
+            # both timestamps, the quantity actually traded and the realised
+            # P&L. `qty` is 0 once a position closes, so the size comes from the
+            # accumulated closed quantity or the row would read as a zero trade.
+            "exit": round(pos.exit_price, 2) if pos.exit_price else None,
+            "closedTs": int(pos.closed_ts * 1000) if pos.closed_ts else None,
+            "openedTs": int(pos.opened_ts * 1000),
+            "realised": round(pos.realised, 2) if pos.closed_ts else None,
             "symbol": pos.symbol,
             "underlying": pos.underlying,
             "expiry": pos.expiry,
             "strike": int(pos.strike),
             "optType": pos.opt_type,
             "side": pos.side,
-            "qty": 0 if closed else pos.qty,
-            "lots": 0 if closed else pos.lots,
+            # A history row reports what was TRADED; a removed row reports zero
+            # so any grid still keying off quantity drops it.
+            "qty": (pos.closed_qty if disposition == "closed"
+                    else 0 if closed else pos.qty),
+            "lots": (pos.closed_lots if disposition == "closed"
+                     else 0 if closed else pos.lots),
             "entry": round(pos.avg_entry, 2),
-            "ltp": round(pos.ltp, 2),
-            "pnl": round(pos.pnl(), 2),
+            "ltp": round(pos.exit_price if disposition == "closed" else pos.ltp, 2),
+            "pnl": round(pos.realised if disposition == "closed" else pos.pnl(), 2),
             "sl": pos.sl,
             "target": pos.target,
             "trail": pos.trail,
@@ -682,9 +798,15 @@ class LiveBook:
     def republish(self) -> None:
         """Re-send every position. Used when a renderer (re)connects: position
         events are deltas, so a reloaded window would otherwise show an empty
-        book until the next tick — indistinguishable from having no positions."""
+        book until the next tick — indistinguishable from having no positions.
+
+        Completed trades are replayed too, or a reload would silently wipe the
+        session's history from the screen while it still existed here.
+        """
         for pos in self.open_positions():
             self._publish(pos)
+        for pos in self.closed_positions():
+            self._publish(pos, closed=True, disposition="closed")
 
     def open_positions(self) -> list[LivePosition]:
         """Snapshot for the live manager. Copies, so evaluation never holds the
@@ -814,7 +936,12 @@ class LiveBook:
         """Start a fresh session — clears counters and the book."""
         with self._lock:
             stale = list(self._positions.values())
+            closed = list(self._closed)
             self._positions.clear()
+            # A fresh session starts with no history either. Leaving it behind
+            # meant yesterday's completed trades sat above today's, and the
+            # session P&L shown against them was no longer the session's.
+            self._closed.clear()
             self._orders_today = 0
             self._realised = 0.0
             self._recent.clear()
@@ -822,7 +949,11 @@ class LiveBook:
         self._persist(immediate=True)
         for pos in stale:
             pos.qty = 0
-            self._publish(pos, closed=True)
+            self._publish(pos, closed=True, disposition="removed")
+        for pos in closed:
+            hub.publish(events.position_update(
+                {"id": f"closed:{pos.key}:{int(pos.closed_ts)}", "qty": 0,
+                 "disposition": "removed", "closed": True}))
         diagnostics.event("orders", "Live session reset", "success")
 
     # ── reads (used by risk validation) ────────────────────────────────────

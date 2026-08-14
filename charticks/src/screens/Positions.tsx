@@ -24,6 +24,7 @@ import {
   useMarketStore,
   parseOptionSymbol,
   type Position as LivePosition,
+  type ClosedPosition,
 } from "@/stores/useMarketStore";
 import type { MonitorState } from "@/bridge/events";
 import { bridge } from "@/bridge/client";
@@ -39,13 +40,30 @@ function AdjLotsStepper({ id, underlying, disabled }:
     { id: string; underlying: string; disabled: boolean }) {
   const adjustLots = usePositionsStore((s) => s.adjustLots);
   const [amount, setAmount] = useState(1);
+  const [busy, setBusy] = useState(false);
+
+  // A refusal must be visible. The engine declines a resize for real reasons —
+  // over a position limit, an exit already in flight, an unknown lot size — and
+  // every one of them used to be swallowed, so the control looked broken rather
+  // than refused.
+  const apply = async (delta: number) => {
+    if (busy || delta === 0) return;
+    if (!marketGate(underlying)) return;
+    setBusy(true);
+    try {
+      await adjustLots(id, delta);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="lots-adj">
       <button
-        disabled={disabled}
-        onClick={() => { if (marketGate(underlying)) adjustLots(id, -amount); }}
-        aria-label="Reduce lots"
+        disabled={disabled || busy}
+        onClick={() => void apply(-amount)}
+        aria-label={`Reduce by ${amount} lot${amount === 1 ? "" : "s"}`}
+        title={`Reduce by ${amount} lot${amount === 1 ? "" : "s"}`}
       >
         −
       </button>
@@ -54,8 +72,11 @@ function AdjLotsStepper({ id, underlying, disabled }:
         type="text"
         inputMode="numeric"
         value={amount}
-        disabled={disabled}
+        disabled={disabled || busy}
         aria-label="Lots to adjust"
+        // Select on focus, so typing REPLACES the amount instead of appending
+        // to it. Clicking into a field showing "1" and typing "2" produced 12.
+        onFocus={(e) => e.currentTarget.select()}
         onChange={(e) => {
           const n = parseInt(e.target.value.replace(/\D/g, ""), 10);
           setAmount(Number.isNaN(n) ? 0 : n);
@@ -63,12 +84,30 @@ function AdjLotsStepper({ id, underlying, disabled }:
         onBlur={() => setAmount((a) => (a < 1 ? 1 : a))}
       />
       <button
-        disabled={disabled}
-        onClick={() => { if (marketGate(underlying)) adjustLots(id, +amount); }}
-        aria-label="Add lots"
+        disabled={disabled || busy}
+        onClick={() => void apply(amount)}
+        aria-label={`Add ${amount} lot${amount === 1 ? "" : "s"}`}
+        title={`Add ${amount} lot${amount === 1 ? "" : "s"}`}
       >
         +
       </button>
+    </div>
+  );
+}
+
+/** Shows the engine's last refusal of a position action, and clears it. */
+function PositionActionError() {
+  const error = usePositionsStore((s) => s.lastError);
+  const clear = usePositionsStore((s) => s.clearError);
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(clear, 8000);
+    return () => clearTimeout(t);
+  }, [error, clear]);
+  if (!error) return null;
+  return (
+    <div className="pos-action-error" role="alert" onClick={clear}>
+      {error}
     </div>
   );
 }
@@ -730,7 +769,15 @@ function LivePositionRow({
       <td className="c-pnl">
         <FlashNumber value={p.pnl} format={money} className={`pnl-cell ${p.pnl >= 0 ? "up" : "down"}`} />
       </td>
-      <td className="c-adj" />
+      <td className="c-adj">
+        {/* Live positions resize with REAL orders now: adding places an entry
+            for the extra lots, reducing is a partial exit of exactly that many.
+            The cell was empty because the endpoint routed to the paper engine
+            whatever the mode, so on a live position it did nothing at all. */}
+        {managed && (
+          <AdjLotsStepper id={p.id} underlying={underlying} disabled={exiting} />
+        )}
+      </td>
       <td className="c-close">
         {exiting ? (
           // No buttons and no second row: the exit already sent IS this
@@ -837,6 +884,47 @@ function OrphanedHedgeDialog() {
   );
 }
 
+/** One completed live trade.
+ *
+ *  Kept because a trade that has been opened, managed and closed is the thing a
+ *  trader most wants to look back at, and the application used to delete it the
+ *  instant the position went flat — the Positions tab could not tell you what
+ *  you had just done. */
+function ClosedPositionRow({ p, showRoll }: { p: ClosedPosition; showRoll: boolean }) {
+  const pnl = p.realised ?? 0;
+  const held = p.openedTs && p.closedTs
+    ? `${new Date(p.openedTs).toLocaleTimeString("en-GB")} → `
+      + `${new Date(p.closedTs).toLocaleTimeString("en-GB")}`
+    : undefined;
+  return (
+    <tr className="closed-row">
+      <td className="c-inst">
+        <div className="sym">
+          {p.symbol}
+          <ExpiryTag expiry={p.expiry} />
+          <span className="mon-badge done" title={held}>✓ Closed</span>
+        </div>
+        <div className="sub">
+          <span className={`dir ${p.side === "BUY" ? "l" : "s"}`}>
+            {p.side === "BUY" ? "L" : "S"}
+          </span>
+          {p.qty} Qty
+          {held && <span className="closed-when"> · {held}</span>}
+        </div>
+      </td>
+      <td className="c-num num">{p.entry.toFixed(2)}</td>
+      <td className="c-num num">{p.exit != null ? p.exit.toFixed(2) : "—"}</td>
+      <td className="c-num num">—</td>
+      <td className="c-pnl">
+        <span className={`pnl-cell ${pnl >= 0 ? "up" : "down"}`}>{money(pnl)}</span>
+      </td>
+      <td className="c-adj" />
+      <td className="c-close" />
+      {showRoll && <td className="c-roll" />}
+    </tr>
+  );
+}
+
 /** Persistent banner listing every position Charticks currently cannot protect.
  *  Deliberately not dismissible and not a toast: the danger lasts exactly as
  *  long as the condition, so the warning does too. */
@@ -866,6 +954,9 @@ function MonitorAlarmBanner() {
 function LivePositionGridPanel() {
   const positionsMap = useMarketStore((s) => s.positions);
   const netPnl = useMarketStore((s) => s.netPnl);
+  const closed = useMarketStore((s) => s.closedPositions);
+  const clearClosed = useMarketStore((s) => s.clearClosedPositions);
+  const closedPnl = closed.reduce((a, p) => a + (p.realised ?? 0), 0);
   const showRoll = useGridPrefsStore((s) => s.cols.roll);
   const ruleFor = useSettingsStore((s) => s.ruleFor);
   const positions = Object.values(positionsMap).filter((p) => p.qty > 0);
@@ -931,6 +1022,7 @@ function LivePositionGridPanel() {
 
       <SessionLimitsBar rollingPnl={netPnl} />
       <MonitorAlarmBanner />
+      <PositionActionError />
       <OrphanedHedgeDialog />
 
       <div className="pbody">
@@ -967,11 +1059,27 @@ function LivePositionGridPanel() {
                 onAdopt={setAdopting}
               />
             ))}
-            {positions.length === 0 && (
+            {positions.length === 0 && closed.length === 0 && (
               <tr>
                 <td colSpan={colCount} className="empty">No open positions</td>
               </tr>
             )}
+            {closed.length > 0 && (
+              <tr className="section-row">
+                <td colSpan={colCount}>
+                  <span>Closed today · {closed.length}</span>
+                  <span className="grow" />
+                  <span className={`num ${closedPnl >= 0 ? "up" : "down"}`}>
+                    {money(closedPnl)}
+                  </span>
+                  <button className="sf-link" onClick={clearClosed}>Clear</button>
+                </td>
+              </tr>
+            )}
+            {/* Newest first: the trade just finished is the one being looked at. */}
+            {[...closed].reverse().map((p) => (
+              <ClosedPositionRow key={p.id} p={p} showRoll={showRoll} />
+            ))}
           </tbody>
         </table>
       </div>

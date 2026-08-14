@@ -548,6 +548,87 @@ class LiveManager:
                              "screen and logs/orders.log for the broker's reason."}
         return {"ok": True, "qty": qty}
 
+    # ── adjust size ───────────────────────────────────────────────────────
+    def adjust_lots(self, position_id: str, delta: int) -> dict:
+        """Grow or shrink a live position by `delta` lots, with real orders.
+
+        The live counterpart of PaperEngine.adjust_lots. It did not exist: the
+        endpoint routed to the paper engine whatever the mode, so on a live
+        position it looked up an id the paper book had never held and returned
+        quietly — a control that appeared to work and did nothing.
+
+        Adding places an ordinary entry order, so it passes every risk rule and
+        margin check an equivalent ticket would. Reducing is a partial exit of
+        exactly `delta` lots, sized from confirmed quantity like every other exit.
+        """
+        try:
+            delta = int(delta)
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "INVALID_ADJUSTMENT",
+                    "error": "Lot adjustment must be a whole number."}
+        if delta == 0:
+            return {"ok": True, "delta": 0}
+
+        pos = live_book.get(position_id)
+        if pos is None or pos.qty <= 0:
+            return {"ok": False, "code": "NO_POSITION",
+                    "error": "That position is no longer open."}
+        if not pos.managed:
+            return {"ok": False, "code": "UNMANAGED_POSITION",
+                    "error": f"{pos.symbol} was not opened by Charticks. Adjust it "
+                             f"in your broker's own terminal, or take it over with "
+                             f"Manage first."}
+        if pos.exit_pending_qty > 0:
+            return {"ok": False, "code": "EXIT_IN_FLIGHT",
+                    "error": "An exit for this position is already at the broker. "
+                             "Wait for it to confirm before resizing."}
+
+        lot_size = int(pos.qty / pos.lots) if pos.lots else 0
+        if lot_size <= 0:
+            return {"ok": False, "code": "UNKNOWN_LOT_SIZE",
+                    "error": f"Charticks does not know {pos.underlying}'s lot size "
+                             f"for this position, so it cannot resize it by lots. "
+                             f"Use the partial-exit buttons instead."}
+
+        if delta > 0:
+            from services.order_manager import LIVE, order_manager
+
+            result = order_manager.place_order(
+                LIVE, pos.underlying, pos.expiry, pos.strike, pos.opt_type,
+                pos.side, delta * lot_size, "MARKET", 0.0, lots=delta,
+                # The position's OWN rule, so the added quantity is managed on
+                # the same terms — record_fill re-derives SL/Target from the new
+                # averaged cost basis, exactly as the paper engine does.
+                rule=pos.rule, product=pos.product, validity="DAY",
+                # Adding to a position the user already holds is not a new
+                # position, and `allow_duplicate` because this is a deliberate
+                # second order on a contract they are already in.
+                allow_duplicate=True,
+                request_id=f"adjust:{pos.key}:+{delta}")
+            if not result.get("ok"):
+                return {"ok": False, "code": result.get("code") or "ADJUST_FAILED",
+                        "error": result.get("error")
+                                 or "The broker did not accept the added lots."}
+            diagnostics.event("orders", "Adjust lots", "added", symbol=pos.key,
+                              lots=delta, qty=delta * lot_size, side=pos.side)
+            return {"ok": True, "delta": delta}
+
+        # Reduce: a partial exit of exactly this many lots.
+        reduce_lots = min(-delta, pos.lots)
+        qty = reduce_lots * lot_size
+        if qty >= pos.exitable_qty:
+            qty = pos.exitable_qty
+        if qty <= 0:
+            return {"ok": False, "code": "NOTHING_TO_REDUCE",
+                    "error": "There is no quantity left to reduce."}
+        if not self._exit(pos, qty, "adjust-lots"):
+            return {"ok": False, "code": "EXIT_FAILED",
+                    "error": "The reducing order was not accepted — see the Orders "
+                             "screen for the broker's reason."}
+        diagnostics.event("orders", "Adjust lots", "reduced", symbol=pos.key,
+                          lots=reduce_lots, qty=qty)
+        return {"ok": True, "delta": -reduce_lots}
+
     # ── roll ──────────────────────────────────────────────────────────────
     def roll_position(self, position_id: str, new_strike: int) -> dict:
         """Move a live position to another strike on the same series.

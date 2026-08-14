@@ -102,6 +102,23 @@ export interface PositionUpdate {
    *  and more than one when the same hedge covers several shorts. A hedge is
    *  never drawn as an independent trade. */
   hedgeFor?: string[] | null;
+  /** What the renderer should do with this row. "no longer open" covers two
+   *  opposite outcomes and they must not be conflated:
+   *
+   *    open     a live position — show it
+   *    closed   a trade of ours completed — ARCHIVE it into the session's
+   *             history with its exit price, times and realised P&L
+   *    removed  the row is simply gone (a foreign leg that vanished, a position
+   *             reconciliation dropped) — delete it
+   *
+   *  Both of the last two used to arrive as a bare `closed: true`, so the grid
+   *  could only delete — which is why a completed live trade left no record. */
+  disposition?: "open" | "closed" | "removed";
+  /** Closed-trade fields, present on a "closed" row. */
+  exit?: number | null;
+  openedTs?: number | null;
+  closedTs?: number | null;
+  realised?: number | null;
   /** Set when the position is gone (qty 0) — the row should disappear. */
   closed?: boolean;
 }
@@ -156,6 +173,33 @@ export interface OrderUpdate {
   price: number;
   status: OrderUpdateStatus;
   ts: number;
+  /** The structured contract. Present so the renderer can CREATE an order row
+   *  from this event and not only update one it already has — every order the
+   *  sidecar originates (stop-loss and target exits, square-offs, roll legs,
+   *  hedges) exists nowhere else, and was previously dropped for lack of a row
+   *  to match. Optional so an older sidecar still updates known rows. */
+  underlying?: string;
+  expiry?: string;
+  strike?: number;
+  optType?: "CE" | "PE";
+  lotSize?: number;
+  /** Ordered quantity, as distinct from `qty` which is filled-or-ordered. */
+  requestedQty?: number;
+  filledQty?: number;
+  /** The limit price the order was placed at (0 for MARKET), as distinct from
+   *  `price`, which is the average fill once there is one. */
+  limitPrice?: number;
+  avgPrice?: number;
+  orderType?: "MARKET" | "LIMIT";
+  product?: "NRML" | "MIS";
+  validity?: "DAY" | "IOC";
+  parentId?: string;
+  account?: string;
+  broker?: string;
+  /** The broker's rejection text, when there is one. */
+  reason?: string | null;
+  /** Set when this order CLOSES a position — the position's id. */
+  exitFor?: string | null;
 }
 
 export interface PnlUpdate {

@@ -375,10 +375,19 @@ class OrderManager:
                         parent_id=parent if len(legs) > 1 else "",
                         client_order_id=str(res.get("clientOrderId") or ""))
             else:
-                # Nothing to track — report the rejection once, here.
+                # Nothing to track — report the rejection once, here. It still
+                # carries the full contract: a rejected order belongs in the
+                # Order Book as much as a filled one, and with only a symbol
+                # string the renderer could not build the row.
                 hub.publish(events.order_update(
                     str(res.get("orderId") or f"{broker}-{symbol_hint}"),
-                    symbol_hint, side, qty, price, "REJECTED"))
+                    f"{underlying} {expiry} {int(strike)} {opt_type}",
+                    side, qty, price, "REJECTED",
+                    underlying=underlying, expiry=expiry, strike=strike,
+                    optType=opt_type, requestedQty=qty, filledQty=0,
+                    limitPrice=price, orderType=order_type, product=product,
+                    validity=validity, account=account_id, broker=broker,
+                    reason=res.get("error")))
 
         ok = any(r.get("ok") for r in results)
         out = {"ok": ok, "results": results, "symbol": symbol_hint}

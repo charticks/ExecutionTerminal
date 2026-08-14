@@ -157,6 +157,9 @@ class TrackedOrder:
             "lotSize": self.lot_size, "price": self.price,
             "orderType": self.order_type, "product": self.product,
             "validity": self.validity,
+            # Set when this order CLOSES a position. Carried so a repaint after a
+            # reload labels exits as exits, exactly as the live events do.
+            "exitFor": self.exit_for or None,
         }
 
 
@@ -480,10 +483,29 @@ class OrderSyncEngine:
             requestedQty=order.qty, price=round(price, 2))
 
     def _publish(self, order: TrackedOrder) -> None:
+        """Push this order's state to the renderer.
+
+        Carries the full structured contract so the Order Book can CREATE the
+        row, not just update one. Every order Charticks did not place from the
+        ticket — a stop-loss exit, a target, a square-off, a roll leg, a hedge —
+        originates here and nowhere else, and the renderer used to drop those
+        events for lack of a row to match, so exits never appeared at all.
+        """
         hub.publish(events.order_update(
             order.order_id, order.symbol, order.side,
             order.filled_qty or order.qty, order.avg_price or order.price,
-            order.status))
+            order.status,
+            underlying=order.underlying, expiry=order.expiry,
+            strike=order.strike, optType=order.opt_type,
+            lotSize=order.lot_size, requestedQty=order.qty,
+            filledQty=order.filled_qty, limitPrice=order.price,
+            avgPrice=order.avg_price, orderType=order.order_type,
+            product=order.product, validity=order.validity,
+            parentId=order.parent_id, account=order.account_id,
+            broker=order.broker, reason=order.reason or None,
+            # What this order is FOR. An exit carries the position it closes, so
+            # the Order Book can show "SL exit" rather than an unexplained sell.
+            exitFor=order.exit_for or None))
 
 
 order_sync = OrderSyncEngine()

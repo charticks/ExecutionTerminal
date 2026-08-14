@@ -491,6 +491,115 @@ check("the short no longer claims to be hedged",
       hedge_manager.hedge_of(KEY.position_id) is None)
 hub_module.hub.publish = _real_hub_publish
 
+# ── 11. Every live order reaches the Order Book ─────────────────────────────
+print("\n11. Order Book carries every order, not just entries")
+reset()
+EVENTS = []
+import bridge.hub as hubmod                                           # noqa: E402
+_real_pub = hubmod.hub.publish
+hubmod.hub.publish = lambda e: EVENTS.append(e)
+try:
+    quote(KEY, 100.0)
+    order_sync.track("E1", "acct-1", "dhan", "NIFTY", "28AUG2026", 25000, "CE",
+                     "BUY", 75, 75, 100.0, rule=RULE, order_type="LIMIT")
+    order_sync.ingest("dhan", "acct-1", [row("E1", FILLED, filled=75)])
+    # An EXIT: originates in the sidecar, so the renderer has no row for it.
+    held = live_book.get(KEY.position_id)
+    order_sync.track("X1", "acct-1", "dhan", "NIFTY", "28AUG2026", 25000, "CE",
+                     "SELL", 75, 75, 0.0, exit_for=held.key, order_type="MARKET")
+    order_sync.ingest("dhan", "acct-1", [row("X1", FILLED, filled=75)])
+finally:
+    hubmod.hub.publish = _real_pub
+
+updates = [e for e in EVENTS if e.get("type") == "order_update"]
+entry = [e for e in updates if e["id"] == "E1"]
+exits = [e for e in updates if e["id"] == "X1"]
+check("the entry order is published", len(entry) >= 1)
+check("the EXIT order is published too", len(exits) >= 1, updates)
+need = ("underlying", "expiry", "strike", "optType", "lotSize", "orderType")
+check("every update carries the structured contract",
+      all(all(k in e and e[k] is not None for k in need) for e in updates),
+      [{k: e.get(k) for k in need} for e in updates])
+check("so the renderer can BUILD a row it never placed",
+      exits and exits[-1]["underlying"] == "NIFTY"
+      and exits[-1]["strike"] == 25000 and exits[-1]["optType"] == "CE")
+check("and the exit is labelled as one",
+      exits and exits[-1].get("exitFor") == KEY.position_id, exits)
+check("a rejected order would carry it as well (snapshot shape)",
+      "exitFor" in order_sync.snapshot()["orders"][0])
+
+# ── 12. Adjusting lots on a LIVE position sends real orders ─────────────────
+print("\n12. Adj Lots on a live position")
+reset()
+quote(KEY, 100.0)
+live_book.record_fill("NIFTY", "28AUG2026", 25000, "CE", "BUY", 150, 2, 100.0,
+                      rule=RULE, product="NRML")
+res = live_manager.adjust_lots(KEY.position_id, 2)
+check("adding 2 lots is accepted", res.get("ok"), res)
+check("and places a REAL order", len(PLACED) == 1, PLACED)
+check("for exactly 2 lots", PLACED and PLACED[0]["lots"] == 2)
+check("sized from the position's own lot size (75)",
+      PLACED and PLACED[0]["qty"] == 150, PLACED)
+check("on the same side", PLACED and PLACED[0]["side"] == "BUY")
+check("carrying the position's rule so the added lots are managed too",
+      PLACED and PLACED[0]["rule"] == RULE)
+
+PLACED.clear(); EXITS.clear()
+res = live_manager.adjust_lots(KEY.position_id, -1)
+check("reducing by 1 lot is accepted", res.get("ok"), res)
+check("as a partial EXIT, not a new order", len(EXITS) == 1 and PLACED == [])
+check("for exactly one lot's quantity", EXITS and EXITS[0]["qty"] == 75, EXITS)
+
+res = live_manager.adjust_lots(KEY.position_id, 1)
+check("a second resize is refused while an exit is in flight",
+      not res.get("ok") and res.get("code") == "EXIT_IN_FLIGHT", res)
+
+reset()
+quote(KEY, 100.0)
+live_book.upsert_external(KEY, "BUY", 150, 100.0, 100.0, 2, "acct-1", "dhan")
+res = live_manager.adjust_lots(KEY.position_id, 1)
+check("an unmanaged position is refused with a reason",
+      not res.get("ok") and res.get("code") == "UNMANAGED_POSITION", res)
+
+# ── 13. A closed live trade is kept as history ──────────────────────────────
+print("\n13. Completed live trades are retained")
+reset()
+quote(KEY, 100.0)
+live_book.record_fill("NIFTY", "28AUG2026", 25000, "CE", "BUY", 75, 1, 100.0,
+                      rule=RULE)
+check("open book has it", len(live_book.open_positions()) == 1)
+live_book.record_fill("NIFTY", "28AUG2026", 25000, "CE", "SELL", 75, 1, 108.0)
+check("it leaves the OPEN book", live_book.open_positions() == [])
+
+hist = live_book.closed_positions()
+check("but is kept as a completed trade", len(hist) == 1, hist)
+done = hist[0] if hist else None
+check("with the entry price", done and done.avg_entry == 100.0)
+check("the exit price", done and done.exit_price == 108.0)
+check("the quantity traded (not the zero it ends on)", done and done.closed_qty == 75)
+check("realised P&L", done and round(done.realised, 2) == 600.0, done.realised if done else None)
+check("an open time and a close time",
+      done and done.opened_ts > 0 and done.closed_ts > 0)
+
+print("   automation must NOT see a closed trade")
+check("not in managed_positions", live_book.managed_positions() == [])
+check("not counted toward exposure limits", live_book.open_count() == 0)
+check("not subscribed for market data", live_book.subscription_keys() == set())
+
+print("   history survives a restart, same day")
+live_store.flush()
+live_book._positions.clear(); live_book._closed.clear()
+live_book.restore()
+check("restored", len(live_book.closed_positions()) == 1,
+      live_book.closed_positions())
+check("with its realised P&L intact",
+      live_book.closed_positions()
+      and round(live_book.closed_positions()[0].realised, 2) == 600.0)
+
+print("   and can be cleared")
+live_book.clear_history()
+check("cleared", live_book.closed_positions() == [])
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     for name in FAIL:

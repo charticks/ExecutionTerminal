@@ -58,12 +58,26 @@ def pnl_update(net_pnl: float) -> dict:
 
 
 def order_update(order_id: str, symbol: str, side: str, qty: int, price: float,
-                 status: str) -> dict:
+                 status: str, **contract) -> dict:
     """Real (or paper) order lifecycle update — mirror of charticks
-    src/bridge/events.ts OrderUpdate."""
+    src/bridge/events.ts OrderUpdate.
+
+    `contract` carries the structured instrument (underlying / expiry / strike /
+    optType / lotSize / orderType …). It is not decoration: the renderer has to
+    be able to CREATE an order row from this event, not merely update one it
+    already has.
+
+    That mattered for every order the renderer did not itself originate — an
+    automated stop-loss exit, a target exit, a square-off, a roll leg, a hedge.
+    Those exist only in the sidecar, so the renderer had no row to match and
+    dropped the event, and the Order Book showed entries but none of the exits
+    that closed them. `symbol` alone cannot be turned into a row: re-deriving a
+    strike and an expiry by parsing "NIFTY 18AUG2026 24800 CE" apart again is
+    exactly the fragility the structured fields exist to avoid.
+    """
     return {"type": "order_update", "id": order_id, "symbol": symbol,
             "side": side, "qty": qty, "price": price, "status": status,
-            "ts": _now_ms()}
+            "ts": _now_ms(), **contract}
 
 
 def broker_status(broker: str, health: str, detail: str | None = None,

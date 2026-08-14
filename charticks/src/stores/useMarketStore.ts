@@ -48,6 +48,25 @@ export interface Position {
   hedgeFor?: string[] | null;
 }
 
+/** A completed live trade, kept as this session's history.
+ *
+ *  The Positions tab used to lose these entirely: the row was deleted the moment
+ *  the position went flat, so a trade that had just been opened, managed and
+ *  closed left no record in the application at all. */
+export interface ClosedPosition extends Position {
+  /** Fill price of the closing order. */
+  exit?: number | null;
+  /** Epoch ms. */
+  openedTs?: number | null;
+  closedTs?: number | null;
+  /** Booked P&L for this trade. */
+  realised?: number | null;
+}
+
+/** How many completed trades the grid keeps. The complete, durable record of
+ *  everything sent to a broker is orders.log; this is a session view. */
+const CLOSED_LIMIT = 500;
+
 /** A hedge whose last protected short has closed, awaiting the user's decision. */
 export interface OrphanedHedge {
   hedgeId: string;
@@ -128,6 +147,9 @@ interface MarketState {
   /** Positions the sidecar cannot currently protect. Empty when everything
    *  open is being monitored. */
   monitorAlarm: MonitorAlarmEntry[];
+  /** Completed live trades, oldest first. */
+  closedPositions: ClosedPosition[];
+  clearClosedPositions: () => void;
   /** Hedges awaiting a Close / Keep decision. Queued rather than held one at a
    *  time: squaring off several shorts at once can orphan several hedges, and
    *  each is a separate decision that must not be lost. */
@@ -147,6 +169,14 @@ export const useMarketStore = create<MarketState>((set) => ({
   netPnl: 0,
   riskHalted: false,
   monitorAlarm: [],
+  closedPositions: [],
+  clearClosedPositions: () => {
+    // The engine owns the history, so it is cleared there and the resulting
+    // events empty the grid — never cleared locally, which would leave the two
+    // disagreeing until the next reload.
+    void bridge.post("/positions/clear-history").catch(() => {});
+    set({ closedPositions: [] });
+  },
   orphanedHedges: [],
   dismissOrphanedHedge: (hedgeId) =>
     set((s) => ({ orphanedHedges: s.orphanedHedges.filter((h) => h.hedgeId !== hedgeId) })),
@@ -172,12 +202,46 @@ export const useMarketStore = create<MarketState>((set) => ({
           };
         }
         case "position_update": {
+          // `disposition` says what to DO with this row, because "no longer
+          // open" covers two opposite outcomes:
+          //
+          //   closed   a trade of ours completed — ARCHIVE it. It moves out of
+          //            the live book and into the session's history, keeping
+          //            entry, exit, quantity, both timestamps and realised P&L.
+          //            These used to be deleted along with everything else, so a
+          //            completed live trade left no record in the application.
+          //   removed  the row is simply gone (a foreign leg that vanished, a
+          //            position reconciliation dropped) — DELETE it.
+          //
+          // Older sidecars send neither; `closed`/`qty<=0` then means delete, as
+          // it always did.
+          if (e.disposition === "closed") {
+            const positions = { ...s.positions };
+            // The open row is keyed by position id; the history row gets its own
+            // id, so remove the open one explicitly.
+            for (const key of Object.keys(positions)) {
+              if (e.underlying && positions[key].symbol === e.symbol
+                  && positions[key].qty > 0 && key !== e.id) {
+                delete positions[key];
+              }
+            }
+            const closed = s.closedPositions.some((c) => c.id === e.id)
+              ? s.closedPositions.map((c) => (c.id === e.id ? { ...c, ...e } : c))
+              : [...s.closedPositions, e as unknown as ClosedPosition];
+            return { positions, closedPositions: closed.slice(-CLOSED_LIMIT) };
+          }
           const positions = { ...s.positions };
-          // A closed position is REMOVED, not kept at qty 0: the sidecar is the
-          // authority on what is open, and a lingering flat row is one more
-          // thing the trader has to work out the meaning of.
-          if (e.closed || e.qty <= 0) delete positions[e.id];
-          else positions[e.id] = { ...positions[e.id], ...e };
+          if (e.disposition === "removed" || e.closed || e.qty <= 0) {
+            delete positions[e.id];
+            if (e.disposition === "removed") {
+              return {
+                positions,
+                closedPositions: s.closedPositions.filter((c) => c.id !== e.id),
+              };
+            }
+          } else {
+            positions[e.id] = { ...positions[e.id], ...e };
+          }
           return { positions };
         }
         case "monitor_alarm":

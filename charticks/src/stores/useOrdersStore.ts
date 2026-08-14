@@ -42,6 +42,18 @@ export interface Order {
   /** The broker's own order id, once placement returns one. Live rows are
    *  matched on this by the Order Synchronization Engine's updates. */
   brokerOrderId?: string;
+  /** Who created this order.
+   *
+   *  "ticket"  the user placed it from the option chain
+   *  "exit"    it CLOSES a position — a stop loss, a target, a trailing stop,
+   *            a manual close, a partial exit, a square-off, a roll's first leg
+   *  "engine"  the sidecar placed it for another reason (an auto-hedge, a
+   *            roll's second leg)
+   *
+   *  Recorded because the Order Book is meant to explain the Positions tab, and
+   *  a SELL that arrived on its own is unreadable without knowing it was a stop
+   *  firing. Absent on rows from before this existed. */
+  origin?: "ticket" | "exit" | "engine";
 }
 
 export interface Trade {
@@ -145,6 +157,11 @@ interface OrdersState {
     id: string,
     patch: { brokerOrderId?: string; status: OrderStatus; filledQty?: number; avgFill?: number },
   ) => void;
+  /** Add an order the SIDECAR placed, which the renderer therefore has no row
+   *  for — a stop-loss or target exit, a square-off, a roll leg, an auto-hedge.
+   *  Idempotent on broker order id, because the same order is republished on
+   *  every state transition and on reconnect. */
+  addBrokerOrder: (order: Order) => void;
 }
 
 export const useOrdersStore = create<OrdersState>((set, get) => ({
@@ -261,6 +278,22 @@ export const useOrdersStore = create<OrdersState>((set, get) => ({
         };
       }),
     })),
+
+  addBrokerOrder: (order) =>
+    set((s) => {
+      // Guard against the same order arriving twice: order_update fires on every
+      // transition (SUBMITTED -> FILLED) and is replayed on reconnect, so an
+      // append-only add would stack duplicates of one broker order.
+      const at = s.orders.findIndex(
+        (o) => o.brokerOrderId === order.brokerOrderId || o.id === order.id,
+      );
+      if (at < 0) return { orders: [...s.orders, order] };
+      const merged = [...s.orders];
+      // Keep the earliest timestamp — the order's own age, not the age of the
+      // update that happened to arrive last.
+      merged[at] = { ...merged[at], ...order, ts: merged[at].ts };
+      return { orders: merged };
+    }),
 }));
 
 // Re-export so callers that used lotSize via this module keep working.

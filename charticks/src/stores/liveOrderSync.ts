@@ -51,6 +51,8 @@ interface SyncRow {
   orderType: OrderType;
   status: OrderUpdateStatus;
   ts: number;
+  /** Set when the order closes a position — see TrackedOrder.exit_for. */
+  exitFor?: string;
 }
 
 /** Repaint the live order book from the sidecar.
@@ -94,6 +96,7 @@ export async function paintLiveBook() {
       price: r.price,
       status: STATUS[r.status] ?? "PENDING",
       avgFill: r.avgPrice > 0 ? r.avgPrice : undefined,
+      origin: r.exitFor ? "exit" : undefined,
     };
   });
   // Trades are not part of this snapshot: the live trade book is built from
@@ -138,13 +141,66 @@ export function startLiveOrderSync() {
       store.orders.find(
         (o) => !o.brokerOrderId && o.status === "PENDING" && o.side === e.side,
       );
-    if (!existing) return;
+
+    if (!existing) {
+      // An order the renderer did not place. This used to `return` — and that is
+      // why the Order Book only ever showed entries.
+      //
+      // Every order the SIDECAR originates arrives this way and no other: a
+      // stop-loss exit, a target exit, a trailing-stop exit, a portfolio-trail
+      // square-off, a manual close, a partial exit, the second leg of a roll,
+      // an auto-hedge. None of them has a local row to match, so all of them
+      // were silently discarded, and the Order Book contradicted the Positions
+      // tab it was supposed to explain.
+      //
+      // The Order Book is meant to be every broker order and its lifecycle, so
+      // the row is CREATED from the event. This needs the structured contract,
+      // which is why order_update now carries it.
+      const created = orderFromEvent(e, status);
+      if (created) store.addBrokerOrder(created);
+      return;
+    }
 
     store.applyBrokerUpdate(existing.id, {
       brokerOrderId: e.id,
       status,
-      filledQty: e.qty,
-      avgFill: e.price > 0 ? e.price : undefined,
+      filledQty: e.filledQty ?? e.qty,
+      avgFill: (e.avgPrice ?? e.price) > 0 ? (e.avgPrice ?? e.price) : undefined,
     });
   });
+}
+
+/** Build an Order row from an order_update the renderer did not originate.
+ *
+ *  Returns null when the event carries no structured contract — an older
+ *  sidecar, or a row we genuinely cannot place in the book. Inventing a strike
+ *  by parsing the display symbol is exactly what the structured fields replaced.
+ */
+function orderFromEvent(
+  e: Extract<BridgeEvent, { type: "order_update" }>,
+  status: OrderStatus,
+): Order | null {
+  if (!e.underlying || !e.optType || e.strike == null) return null;
+  const lot = e.lotSize && e.lotSize > 0 ? e.lotSize : 1;
+  const qty = e.requestedQty ?? e.qty;
+  return {
+    id: e.id,
+    brokerOrderId: e.id,
+    ts: e.ts,
+    underlying: e.underlying,
+    expiry: e.expiry,
+    strike: e.strike,
+    optType: e.optType,
+    side: e.side,
+    orderType: (e.orderType as OrderType) ?? "MARKET",
+    lots: Math.max(1, Math.round(qty / lot)),
+    filledLots: Math.round((e.filledQty ?? 0) / lot),
+    qty,
+    price: e.limitPrice ?? 0,
+    status,
+    avgFill: (e.avgPrice ?? 0) > 0 ? e.avgPrice : undefined,
+    // Why this order exists. An exit that says so reads as the close of a
+    // position rather than as an unexplained sell nobody remembers placing.
+    origin: e.exitFor ? "exit" : "engine",
+  };
 }
