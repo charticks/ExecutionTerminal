@@ -1,6 +1,6 @@
-import { app } from "electron";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { logsDir } from "./logs";
 
 /**
  * Startup phase timing.
@@ -38,7 +38,7 @@ let written = false;
  */
 function trace(m: Mark): void {
   try {
-    const dir = join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     mkdirSync(dir, { recursive: true });
     appendFileSync(
       join(dir, "startup.log"),
@@ -67,7 +67,7 @@ export function mark(phase: string, detail?: string): number {
 /** Open a fresh trace for this launch, so one file is one startup. */
 export function beginTrace(): void {
   try {
-    const dir = join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "startup.log"),
       `=== Charticks startup trace — ${new Date().toISOString()} ===\n`, "utf-8");
@@ -109,7 +109,7 @@ export function flush(reason: string): void {
     `  ${String(total).padStart(6)}ms  TOTAL to interactive`,
   ];
   try {
-    const dir = join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "startup.log"), lines.join("\n") + "\n", "utf-8");
     // A copy that is never overwritten, so the last complete startup survives

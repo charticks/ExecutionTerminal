@@ -30,7 +30,10 @@ def log_dir() -> str:
 
     Separate env var from CHARTICKS_DATA_DIR because logs are what a user is
     asked to send when reporting a problem, so they need a stable, findable
-    location even if the cache is redirected to a scratch disk.
+    location even if the cache is redirected to a scratch disk. The packaged app
+    points this at ``Documents/Charticks`` (see charticks/electron/logs.ts) —
+    somewhere a tester can reach without being told a path — while the ~100 MB/day
+    instrument cache stays in appData.
     """
     base = os.environ.get("CHARTICKS_LOG_DIR") or os.environ.get("CHARTICKS_DATA_DIR") or SIDECAR_DIR
     path = os.path.join(base, "logs")

@@ -85,6 +85,7 @@ GET /health                                {"ok":true,…}
 GET /live-book  (correct bearer)           {"positions":[],…}
 GET /live-book  (no bearer)                {"detail":"unauthorized"}
 logs/ written under CHARTICKS_LOG_DIR      6 files
+  (Documents\Charticks\logs; appData only as a fallback — see docs/LOGGING.md)
 ```
 
 ## If the runtime is missing
@@ -93,5 +94,5 @@ logs/ written under CHARTICKS_LOG_DIR      6 files
 `build:runtime` still works for anyone who has Python. If neither exists, the
 spawn fails with ENOENT — which arrives as `'error'`, not `'exit'` — and the
 app shows a dialog naming the problem and writes to
-`%APPDATA%/charticks/logs/sidecar-process.log`. Before this, that failure
+`Documents\Charticks\logs\sidecar-process.log`. Before this, that failure
 produced no dialog and no log entry at all.

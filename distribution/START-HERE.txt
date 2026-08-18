@@ -68,11 +68,24 @@ IF SOMETHING GOES WRONG
   Send three things:
     1. A screenshot of the whole window
     2. What you did just before it happened
-    3. Everything in this folder:  %APPDATA%\Charticks\logs
+    3. The logs - EASIEST WAY:
+
+         In the app, go to  Settings > Diagnostics
+         Click  "Save Diagnostics ZIP"
+
+       It writes charticks-logs-<date>.zip to your Desktop and
+       opens the folder with the file selected. Attach that.
+
+       "Open Logs Folder" beside it opens the same logs directly.
+
+  If the app will not start at all, the logs are still on disk:
+
+    Documents\Charticks\logs
 
   The most useful files are:
     startup.log         why the app was slow to start
     sidecar-process.log why the trading engine did not start
+    broker.log          why your broker would not connect
     orders.log          what was sent to your broker, and when
     application.log     everything else
 

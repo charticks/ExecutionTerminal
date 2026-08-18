@@ -124,13 +124,16 @@ Please send these three things — it makes problems much faster to fix:
 
 1. **A screenshot** of the whole Charticks window
 2. **What you did** just before it went wrong
-3. **The log file**, found here — paste this into the File Explorer address bar:
+3. **The logs.** In the app: **Settings → Diagnostics → Save Diagnostics ZIP**.
+   It writes `charticks-logs-<date>.zip` to your Desktop and opens the folder
+   with the file selected — attach that.
+
+   If the app will not start, the same files are on disk. Paste this into the
+   File Explorer address bar and send everything in it:
 
    ```
-   %LOCALAPPDATA%\Programs\charticks\resources\sidecar\logs
+   Documents\Charticks\logs
    ```
-
-   Send the newest folder in there.
 
 ### Common problems
 

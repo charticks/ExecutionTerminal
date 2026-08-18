@@ -43,6 +43,15 @@ contextBridge.exposeInMainWorld("charticks", {
     ipcRenderer.on("bridge:config-changed", handler);
     return () => ipcRenderer.removeListener("bridge:config-changed", handler);
   },
+  // Reaching the log files from inside the app, so nobody has to be told a
+  // path when something fails mid-session. See electron/logs.ts.
+  diagnostics: {
+    info: (): Promise<{ dir: string }> => ipcRenderer.invoke("diagnostics:info"),
+    open: (): Promise<{ ok: boolean; dir: string; error?: string }> =>
+      ipcRenderer.invoke("diagnostics:open"),
+    saveBundle: (): Promise<{ ok: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke("diagnostics:bundle"),
+  },
   // Encrypted broker credential store (main process is the only place
   // safeStorage works). Secrets never persist in the renderer.
   brokers: {

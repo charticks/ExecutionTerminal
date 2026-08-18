@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } from "electron";
 import { spawn, ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { adopt, beginTrace, flush as flushStartup, mark, timeline } from "./startup";
+import { logRoot, logsDir } from "./logs";
 
 // vite-plugin-electron injects this in dev; absent in packaged builds.
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
@@ -22,7 +23,7 @@ const isDev = !!DEV_SERVER_URL;
 function fatal(kind: string, err: unknown): void {
   const text = err instanceof Error ? (err.stack ?? err.message) : String(err);
   try {
-    const dir = join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     mkdirSync(dir, { recursive: true });
     appendFileSync(join(dir, "main-process.log"),
       `${new Date().toISOString()} | ${kind} | ${text}\n`, "utf-8");
@@ -207,7 +208,11 @@ function startSidecar() {
         // into the install directory, which may be read-only and is wiped on
         // reinstall. See sidecar/services/paths.py.
         CHARTICKS_DATA_DIR: app.getPath("userData"),
-        CHARTICKS_LOG_DIR: app.getPath("userData"),
+        // Logs go somewhere a person can find without being told a path —
+        // Documents\Charticks\logs. Separate from the cache above on purpose:
+        // the cache is machine noise, the logs are what a tester is asked to
+        // send when a live trade fails. See electron/logs.ts.
+        CHARTICKS_LOG_DIR: logRoot(),
         // Broker SDKs print ₹ and other non-ASCII; without this Python's
         // Windows console encoding raises UnicodeEncodeError mid-write and
         // takes the log line (or the handler) down with it.
@@ -327,7 +332,7 @@ function reportSidecarUnstartable() {
         + `Close any other Charticks window, then start Charticks again.\n\n`
       : `The trading engine started and then stopped, ${SIDECAR_MAX_FAILURES} times in a row.\n\n`)
     + `Last message from the engine:\n${lastSidecarError.slice(0, 300) || "(none)"}\n\n`
-    + `Full details are in logs\\sidecar-process.log in:\n${app.getPath("userData")}`,
+    + `Full details are in sidecar-process.log here:\n${logsDir()}`,
   );
 }
 
@@ -349,8 +354,8 @@ function reportMissingPython() {
       '2. On the first installer screen, tick "Add python.exe to PATH"\n' +
       "3. Run setup-tester.bat from the Charticks folder\n" +
       "4. Start Charticks again\n\n" +
-      "Details were written to logs\\sidecar-process.log in:\n" +
-      app.getPath("userData"),
+      "Details were written to sidecar-process.log here:\n" +
+      logsDir(),
   );
 }
 
@@ -370,7 +375,7 @@ function writeSidecarOutput(stream: "out" | "err", chunk: string) {
   if (stream === "err") console.error("[sidecar]", text);
   else console.log("[sidecar]", text);
   try {
-    const dir = join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString();
     const line = text.split("\n").map((l) => `${stamp} | ${stream} | ${l}`).join("\n");
@@ -938,6 +943,66 @@ ipcMain.on("startup:mark", (_e, phase: string, detail?: string) => {
 });
 
 ipcMain.handle("startup:timeline", () => timeline());
+
+// ── diagnostics: reaching the logs without being told a path ───────────────
+// Every previous "send me your logs" round trip failed the same way: the path
+// was in a troubleshooting document, the folder was hidden, and the tester who
+// had just watched a live Kotak order fail had no way to get at the one file
+// that said why. These two handlers make it a button.
+
+ipcMain.handle("diagnostics:info", () => ({ dir: logsDir() }));
+
+ipcMain.handle("diagnostics:open", async (): Promise<{ ok: boolean; dir: string; error?: string }> => {
+  const dir = logsDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+    // Non-empty string means Electron failed to open it (no shell association,
+    // path gone). Reported rather than swallowed — a button that does nothing
+    // is worse than one that says why.
+    const err = await shell.openPath(dir);
+    return err ? { ok: false, dir, error: err } : { ok: true, dir };
+  } catch (e) {
+    return { ok: false, dir, error: e instanceof Error ? e.message : String(e) };
+  }
+});
+
+/**
+ * Zip the current log files onto the Desktop, ready to attach to a message.
+ *
+ * Only `*.log` — not the rotated `.log.1…5` backups — so the bundle stays a few
+ * megabytes rather than the ~150 MB the rotation ceiling allows. The live files
+ * are the session being reported on.
+ *
+ * Compress-Archive rather than a zip dependency: it ships with Windows, and
+ * adding a native archiver to an app whose whole packaging story is "no
+ * prerequisites" would be a poor trade for one button.
+ */
+ipcMain.handle("diagnostics:bundle", async (): Promise<{ ok: boolean; path?: string; error?: string }> => {
+  const dir = logsDir();
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const out = join(app.getPath("desktop"), `charticks-logs-${stamp}.zip`);
+  if (process.platform !== "win32") {
+    return { ok: false, error: "Bundling is Windows-only; open the folder and zip it yourself." };
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const ps = spawn("powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        `Compress-Archive -Path '${join(dir, "*.log").replace(/'/g, "''")}' ` +
+        `-DestinationPath '${out.replace(/'/g, "''")}' -Force`,
+      ], { windowsHide: true });
+      let stderr = "";
+      ps.stderr?.on("data", (d) => (stderr += d.toString()));
+      ps.on("error", reject);
+      ps.on("exit", (code) =>
+        code === 0 ? resolve() : reject(new Error(stderr.trim() || `exit ${code}`)));
+    });
+    shell.showItemInFolder(out);
+    return { ok: true, path: out };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
 
 /** Ask the sidecar for its internal phase timings and put them on our clock. */
 async function collectSidecarProfile(): Promise<void> {

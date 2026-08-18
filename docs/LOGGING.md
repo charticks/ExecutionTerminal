@@ -20,8 +20,9 @@ error became a bare 500 with the trace on a stdout nobody reads), and ~26
 
 ## Where the logs are
 
-`%APPDATA%/charticks/logs/` in the packaged app — Electron passes
-`CHARTICKS_LOG_DIR`. In dev it falls back to `sidecar/logs/`.
+`Documents\Charticks\logs\` in the packaged app — Electron resolves the location
+(`charticks/electron/logs.ts`) and passes the parent as `CHARTICKS_LOG_DIR`. In
+dev it falls back to `sidecar/logs/`.
 
 ```
 application.log       every event, chronological — the narrative
@@ -31,7 +32,28 @@ websocket.log         feed connect/subscribe/interruption/recovery
 risk.log              validation started / passed / rejected, with the rule
 exceptions.log        every unexpected exception, with a full stack trace
 sidecar-process.log   sidecar stdout/stderr, written by Electron
+startup.log           this launch's phase timings, written live
+startup-history.log   every previous launch's completed timeline
+main-process.log      anything that killed the Electron main process
 ```
+
+**Why not `%APPDATA%`.** It was there first, and it is the conventional answer.
+It also failed the only test that matters: a tester whose Kotak Neo live order
+was failing could not produce a single log line, because the path existed only
+inside a troubleshooting document and pointed into a hidden folder. `Documents`
+is somewhere a person finds without being told, and survives uninstalling the
+app. AppData remains the automatic fallback when `Documents` cannot be written
+(redirected/offline OneDrive, locked-down machine); the probe is a real file
+write, since a redirected folder can exist and still refuse one.
+
+The instrument cache did **not** move — it is ~100 MB a day of machine noise and
+stays in `%APPDATA%\Charticks\data_cache` under `CHARTICKS_DATA_DIR`.
+
+**Reaching them from inside the app:** Settings → Diagnostics → *Open Logs
+Folder*, or *Save Diagnostics ZIP*, which writes `charticks-logs-<timestamp>.zip`
+to the Desktop (current `*.log` files only, not the rotated backups) and reveals
+it in Explorer. That path is what testers should be pointed at, rather than any
+written-down folder location.
 
 Every line lands in its category file **and** in `application.log`, so the
 per-category files stay readable while `application.log` remains the single

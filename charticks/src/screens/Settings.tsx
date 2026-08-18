@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import * as diagnostics from "@/lib/diagnostics";
 import { INDEX_BY_ID } from "@/lib/indices";
 import type { RiskMode, TrailMode } from "@/lib/risk";
 import {
@@ -559,6 +560,59 @@ function NotificationsCard({ draft, patch }: Draft) {
   );
 }
 
+// ── Diagnostics: the log files, one click away ───────────────────────────────
+// Not part of the trading profile, so it takes no draft slice and saves
+// nothing. It lives on this page because it is the page people already open
+// when they are trying to work out what the app just did.
+function DiagnosticsCard() {
+  const [dir, setDir] = useState("");
+  const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  useEffect(() => {
+    diagnostics.logFolder().then(setDir);
+  }, []);
+
+  const open = async () => {
+    const res = await diagnostics.openLogFolder();
+    setStatus(res.ok ? null : { kind: "err", text: res.error ?? "Could not open the folder." });
+  };
+
+  const bundle = async () => {
+    setStatus({ kind: "ok", text: "Creating…" });
+    const res = await diagnostics.saveDiagnosticsBundle();
+    setStatus(
+      res.ok
+        ? { kind: "ok", text: `Saved to your Desktop: ${res.path?.split(/[\\/]/).pop()}` }
+        : { kind: "err", text: res.error ?? "Could not create the bundle." },
+    );
+  };
+
+  return (
+    <Card title="Logs & Diagnostics" hint="What to send when something goes wrong">
+      <p className="sf-note" style={{ marginTop: 0 }}>
+        Charticks writes down everything it does — broker logins, every order it
+        sent and what came back, feed interruptions and any unexpected error.
+        When a connection or a live order fails, this folder says why.
+      </p>
+      {dir && <div className="sf-path" title={dir}>{dir}</div>}
+      <div className="sf-diag-actions">
+        <button className="btn-ghost" onClick={open} disabled={!diagnostics.available()}>
+          Open Logs Folder
+        </button>
+        <button className="btn-ghost" onClick={bundle} disabled={!diagnostics.available()}>
+          Save Diagnostics ZIP
+        </button>
+      </div>
+      {status && (
+        <p className={`sf-note ${status.kind === "err" ? "sf-note-err" : ""}`}>{status.text}</p>
+      )}
+      {!diagnostics.available() && (
+        <p className="sf-note">Available in the desktop app.</p>
+      )}
+    </Card>
+  );
+}
+
 export function Settings() {
   const activeProfile = useSettingsStore((s) => s.activeProfile);
   const profiles = useSettingsStore((s) => s.profiles);
@@ -613,6 +667,9 @@ export function Settings() {
           <RiskDefaultsCard {...slice} />
           {showsHedging(draft.style) && <HedgingCard {...slice} />}
           <NotificationsCard {...slice} />
+
+          <SectionTitle>Diagnostics</SectionTitle>
+          <DiagnosticsCard />
         </div>
         <div className="sf-footer">
           {justSaved && !dirty && <span className="sf-saved">Saved ✓</span>}

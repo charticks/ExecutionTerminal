@@ -134,9 +134,20 @@
 
 <h2>Where the log files are</h2>
 
-<p>Paste this into the File Explorer address bar:</p>
+<p><strong>From inside the app — no path to type.</strong> Go to
+<strong>Settings &rarr; Diagnostics</strong>:</p>
 
-<div class="pathbox">%APPDATA%\Charticks\logs</div>
+<ul>
+  <li><strong>Save Diagnostics ZIP</strong> — writes
+      <code>charticks-logs-&lt;date&gt;.zip</code> to your Desktop and opens the
+      folder with it selected. Attach that file to your report.</li>
+  <li><strong>Open Logs Folder</strong> — opens the logs themselves in Explorer.</li>
+</ul>
+
+<p>If the app will not start, the logs are still on disk. Paste this into the
+File Explorer address bar:</p>
+
+<div class="pathbox">Documents\Charticks\logs</div>
 
 <p>Send <strong>everything in that folder</strong> — the files are small. There are no
 date-named subfolders; each file is appended to as you use the app.</p>
@@ -177,10 +188,15 @@ date-named subfolders; each file is appended to as you use the app.</p>
 
 <div class="box warn">
   <p><strong>If you were given an older instruction</strong> pointing at
+  <code>%APPDATA%\Charticks\logs</code>, at
   <code>%LOCALAPPDATA%\Programs\charticks\resources\sidecar\logs</code>, or telling
   you to send "the newest date folder", or naming <code>sidecar.log</code> —
-  those are all out of date. Use the folder above; the files listed there are the
-  current ones.</p>
+  those are all out of date. Use Settings &rarr; Diagnostics, or the folder above.</p>
+  <p>The logs moved to <code>Documents</code> so you can find them without
+  digging through hidden folders. On a machine where <code>Documents</code>
+  cannot be written, the app falls back to
+  <code>%APPDATA%\Charticks\logs</code> — the Diagnostics panel always shows the
+  path actually in use.</p>
 </div>
 
 <h2>A live position is missing from the Positions grid</h2>
@@ -251,7 +267,8 @@ from your own machine. To confirm it is running, open PowerShell and run:</p>
 <ol>
   <li>A screenshot of the <strong>whole</strong> window</li>
   <li>What you did immediately before it went wrong</li>
-  <li>Everything in <code>%APPDATA%\Charticks\logs</code></li>
+  <li>The ZIP from <strong>Settings &rarr; Diagnostics &rarr; Save Diagnostics ZIP</strong>
+      (or everything in <code>Documents\Charticks\logs</code>)</li>
 </ol>
 
 <div class="box danger">

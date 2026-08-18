@@ -112,35 +112,49 @@ export function Brokers() {
             const detail = health[a.id]?.detail;
             const isConnected = h === "connected";
             return (
-              // A div, not a label: the row holds two independent checkboxes
-              // (select + Execute) and nesting them under one label would make
-              // clicking Execute also toggle the selection.
-              <div className={`broker-row ${selected.has(a.id) ? "sel" : ""}`} key={a.id}>
-                <label className="broker-row-select">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(a.id)}
-                    onChange={() => toggle(a.id)}
-                    aria-label={`Select ${displayName(a)}`}
-                  />
-                  <span className={`d ${healthClass(h)}`} title={detail ?? h ?? "disconnected"} />
-                  <span className="broker-row-name">{displayName(a)}</span>
-                </label>
-                <label
-                  className={`broker-row-exec ${a.execute ? "on" : ""} ${isConnected ? "" : "off"}`}
-                  title={executeTooltip(a, isConnected)}
-                >
-                  <input
-                    type="checkbox"
-                    checked={a.execute}
-                    disabled={!isConnected}
-                    onChange={(e) => onExecuteChange(a, e.target.checked)}
-                    aria-label={`Execute live orders on ${displayName(a)}`}
-                  />
-                  <span>Execute</span>
-                </label>
+              // The failure message is a SIBLING of the row, not a cell in it.
+              // As a third grid cell it was sized to its own content rather
+              // than to the track, so a long broker error (Kotak's login
+              // failures run to a full sentence of instructions) escaped the
+              // row and drew straight across the broker above it — the one
+              // moment the text matters most is the one where it was
+              // unreadable.
+              <div className={`broker-item ${selected.has(a.id) ? "sel" : ""}`} key={a.id}>
+                {/* A div, not a label: the row holds two independent checkboxes
+                    (select + Execute) and nesting them under one label would
+                    make clicking Execute also toggle the selection. */}
+                <div className="broker-row">
+                  <label className="broker-row-select">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(a.id)}
+                      onChange={() => toggle(a.id)}
+                      aria-label={`Select ${displayName(a)}`}
+                    />
+                    <span className={`d ${healthClass(h)}`} title={detail ?? h ?? "disconnected"} />
+                    <span className="broker-row-name">{displayName(a)}</span>
+                  </label>
+                  <label
+                    className={`broker-row-exec ${a.execute ? "on" : ""} ${isConnected ? "" : "off"}`}
+                    title={executeTooltip(a, isConnected)}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={a.execute}
+                      disabled={!isConnected}
+                      onChange={(e) => onExecuteChange(a, e.target.checked)}
+                      aria-label={`Execute live orders on ${displayName(a)}`}
+                    />
+                    <span>Execute</span>
+                  </label>
+                </div>
                 {detail && !isConnected && (
-                  <span className="broker-row-detail" title={detail}>{detail}</span>
+                  <p className="broker-row-detail" role="status">
+                    <span className="broker-row-detail-label">
+                      {h === "session_expired" ? "Login failed" : "Not connected"}
+                    </span>
+                    {detail}
+                  </p>
                 )}
               </div>
             );
