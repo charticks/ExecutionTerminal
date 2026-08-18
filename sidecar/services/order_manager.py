@@ -842,25 +842,50 @@ class OrderManager:
         feed = self._kotak_feed(account_id)
         scrip = getattr(feed, "scrip", None) if feed is not None else None
         loaded = int(getattr(scrip, "row_count", 0) or 0)
+        options = int(getattr(scrip, "option_count", 0) or 0)
         reason = getattr(scrip, "last_error", None) if scrip is not None else None
 
         if feed is None:
             return (f"Kotak has no market-data feed attached to this account, so "
                     f"{contract} cannot be resolved. Reconnect the Kotak account.")
-        if loaded == 0:
-            return (f"Kotak's instrument list could not be loaded"
-                    + (f" ({reason})" if reason else "")
-                    + f", so {contract} cannot be traded. Charticks retries this "
-                      f"automatically; if it keeps failing, reconnect the Kotak "
-                      f"account and check broker.log.")
+        # Counted in OPTIONS. A list holding only index spots is not a list that
+        # can trade, and reporting its size ("4 instruments") sent the reader
+        # looking for a wrong expiry instead of a failed download.
+        if options == 0:
+            return (f"Kotak's instrument list has no tradable options in it"
+                    + (f" — {reason}" if reason else "")
+                    + f", so {contract} cannot be traded"
+                    + (f" (the list did load {loaded:,} non-option entries, which is "
+                       f"why this is not simply an empty download)" if loaded else "")
+                    + f". Charticks retries this automatically; if it keeps failing, "
+                      f"reconnect the Kotak account and send broker.log.")
         from services.feeds.kotak_scrip import OPT_SEGMENT
         if underlying.upper() not in OPT_SEGMENT:
             return (f"Charticks does not have a Kotak exchange segment mapped for "
                     f"{underlying}, so it cannot route {contract} there.")
-        return (f"Kotak's instrument list ({loaded:,} instruments) does not contain "
-                f"{contract}. Check the expiry is one Kotak lists — its master is "
-                f"refreshed daily, so a contract added today may need the account "
-                f"reconnected.")
+
+        # Say what the master DOES hold for this underlying, expiry and strike.
+        # The previous message asserted absence and blamed the expiry, which was
+        # wrong often enough to send people re-checking a correct expiry.
+        from services.instruments import InstrumentKey
+        key = InstrumentKey.option(underlying, expiry, strike, opt_type)
+        detail = ""
+        try:
+            if scrip is not None and hasattr(scrip, "explain_miss"):
+                detail = scrip.explain_miss(key)
+        except Exception as exc:      # diagnosis must never mask the rejection
+            diagnostics.exception("orders", "Kotak miss diagnosis failed",
+                                  exc_info=exc, symbol=str(key))
+        diagnostics.emit("orders", "warn", "Kotak contract not resolved",
+                         requested=key.position_id, underlying=underlying,
+                         expiry=expiry, strike=int(strike), optType=opt_type,
+                         optionsLoaded=options, instrumentsLoaded=loaded,
+                         diagnosis=detail or "(unavailable)")
+        return (f"Kotak's instrument list ({options:,} options) does not contain "
+                f"{contract}"
+                + (f" — {detail}" if detail else "")
+                + ". Its master is refreshed daily, so a contract added today may "
+                  "need the account reconnected.")
 
     def _place_kotak(self, account_id: str, client: Any, underlying: str,
                      expiry: str, strike: float, opt_type: str, side: str,
