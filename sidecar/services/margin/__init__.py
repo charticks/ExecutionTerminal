@@ -28,7 +28,7 @@ from .engine import MarginEngine, MarginRejection, margin_engine
 # Import for side effect: each module registers its checker on import. Listed
 # explicitly (rather than discovered) so an accidental deletion is a visible
 # import error, not a broker that silently stops being margin-checked.
-from . import angel, dhan, kotak, icici  # noqa: E402,F401  (registration)
+from . import angel, dhan, firstock, kotak, icici  # noqa: E402,F401  (registration)
 
 __all__ = [
     "MarginChecker", "MarginQuote", "MarginRequest", "MarginUnavailable",

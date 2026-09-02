@@ -25,6 +25,17 @@ def data_dir() -> str:
     return path
 
 
+def strategies_dir() -> str:
+    """The project's `strategies/` folder — legacy-format preset JSON files,
+    one file per strategy, read-only from the sidecar's point of view.
+    Sits next to `sidecar/` in both layouts this project ships: the repo
+    root in dev, `resources/` in a packaged build (see charticks/
+    package.json's `extraResources`, which copies `../strategies` there
+    alongside `sidecar`) — so the same one-level-up-from-SIDECAR_DIR walk
+    resolves correctly in both."""
+    return os.path.join(os.path.dirname(SIDECAR_DIR), "strategies")
+
+
 def log_dir() -> str:
     """Writable directory for Charticks' own log files.
 

@@ -1,7 +1,7 @@
 // Typed event contract between the Python sidecar (data plane) and the renderer.
 // Keep in sync with sidecar/bridge/events.py.
 
-export type BrokerId = "angel" | "kotak" | "dhan" | "icici";
+export type BrokerId = "angel" | "kotak" | "dhan" | "icici" | "firstock";
 // Kept in sync with sidecar/services/broker_manager.py health values.
 // "reconnecting" is retained as an alias of the amber/transitional state.
 export type BrokerHealth =
@@ -102,6 +102,11 @@ export interface PositionUpdate {
    *  and more than one when the same hedge covers several shorts. A hedge is
    *  never drawn as an independent trade. */
   hedgeFor?: string[] | null;
+  /** The strategy instance that placed this position, if any — null for a
+   *  manually-opened trade. See sidecar/services/live_book.py's
+   *  _owner_instance_id (a deferred lookup into the strategy engine's
+   *  ownership map, mirroring hedgedBy/hedgeFor's own pattern above). */
+  ownerInstanceId?: string | null;
   /** What the renderer should do with this row. "no longer open" covers two
    *  opposite outcomes and they must not be conflated:
    *
@@ -313,6 +318,48 @@ export interface PaperStateEvent {
   ts: number;
 }
 
+// Strategy engine — mirror of sidecar/services/strategy_engine/manager.py and
+// sidecar/bridge/events.py's strategy_status/strategy_pnl/strategy_log.
+export type StrategyInstanceState = "new" | "running" | "stopped" | "error";
+
+export interface StrategyStatusEvent {
+  type: "strategy_status";
+  id: string;
+  strategy: string; // the registered spec name, e.g. "quant_preset"
+  params: Record<string, unknown>;
+  autoStart: boolean;
+  state: StrategyInstanceState;
+  error?: string | null;
+  createdTs: number;
+  startedTs?: number | null;
+  stoppedTs?: number | null;
+  /** "manual" (created via the create dialog) or "discovered" (created by
+   *  scanning strategies/ — see discovery.py). Purely presentational. */
+  source: "manual" | "discovered";
+  /** Present and true only when this instance was just deleted — the store
+   *  drops the row instead of merging it, the same "removed" idea
+   *  PositionUpdate.disposition uses. */
+  removed?: boolean;
+  ts: number;
+}
+
+/** Combined open P&L per RUNNING instance, pushed roughly once a second —
+ *  one event for every running instance rather than one per instance. */
+export interface StrategyPnlEvent {
+  type: "strategy_pnl";
+  pnls: Record<string, number>;
+  ts: number;
+}
+
+export interface StrategyLogEvent {
+  type: "strategy_log";
+  instanceId: string;
+  strategy: string;
+  level: "info" | "warn" | "error";
+  message: string;
+  ts: number;
+}
+
 // Aggregate connectivity state for the header badge. Published by
 // sidecar/services/reliability/health_monitor.py on state transitions only —
 // distinct from per-account BrokerStatusEvent.
@@ -344,4 +391,7 @@ export type BridgeEvent =
   | LogLine
   | ConnectionHealthEvent
   | OptionChainUpdateEvent
-  | PaperStateEvent;
+  | PaperStateEvent
+  | StrategyStatusEvent
+  | StrategyPnlEvent
+  | StrategyLogEvent;

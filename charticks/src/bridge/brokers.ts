@@ -10,9 +10,10 @@ export const BROKER_LABEL: Record<BrokerId, string> = {
   kotak: "Kotak Neo",
   dhan: "Dhan HQ",
   icici: "ICICI Direct",
+  firstock: "Firstock",
 };
 
-export const BROKER_ORDER: BrokerId[] = ["angel", "kotak", "dhan", "icici"];
+export const BROKER_ORDER: BrokerId[] = ["angel", "kotak", "dhan", "icici", "firstock"];
 
 /** A credential field to render in the Add/Edit dialog. `secret` fields are
  *  masked in the UI; all credential values are encrypted at rest. */
@@ -49,6 +50,20 @@ export const CRED_FIELDS: Record<BrokerId, CredField[]> = {
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "sessionToken", label: "Session Key", secret: true,
       placeholder: "Use the Log in with ICICI button below" },
+  ],
+  // Firstock hashes the password itself (SHA-256) before it leaves the sidecar,
+  // so the user types it exactly as they would on Firstock's own site. Vendor
+  // Code and API Key are a matched pair from the Firstock API app. The TOTP
+  // secret is the 2FA SETUP KEY, not a code: Firstock rejects every login that
+  // arrives without a TOTP, so the sidecar generates a fresh one per attempt
+  // (which is also what makes unattended re-authentication possible).
+  firstock: [
+    { key: "userId", label: "User ID" },
+    { key: "password", label: "Password", secret: true },
+    { key: "vendorCode", label: "Vendor Code" },
+    { key: "apiKey", label: "API Key", secret: true },
+    { key: "totpSecret", label: "TOTP Secret", secret: true,
+      placeholder: "2FA setup key — not a 6-digit code" },
   ],
 };
 

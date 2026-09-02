@@ -4,3 +4,13 @@
 # from the parent project when live brokers are wired in (Phase 1).
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
+# Firstock streams plain JSON over a raw WebSocket rather than through a
+# vendor SDK, so this is imported directly (services/feeds/firstock_feed.py).
+# It also arrives transitively with the broker SDKs; pinned here because we
+# now depend on it in our own code, not just theirs.
+websocket-client==1.8.0
+# Firstock rejects every login that arrives without a TOTP, so generating one
+# is on the mandatory path rather than a 2FA extra (firstock_client.login).
+# It also arrives with the Angel and Kotak SDKs; pinned here for the same
+# reason as above — our own code imports it now, not just theirs.
+pyotp==2.10.0

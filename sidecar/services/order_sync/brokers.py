@@ -132,7 +132,33 @@ def icici_orders(session: Any) -> list[BrokerOrder]:
     return out
 
 
+def firstock_orders(session: Any) -> list[BrokerOrder]:
+    # `order_book()` already returns the rows themselves, so there is no wrapper
+    # to unpick. Firstock's status vocabulary - OPEN, COMPLETE, CANCELED,
+    # REJECTED, TRIGGER_PENDING, INVALID - is resolved by map_status()'s
+    # substring matching without a new table: "canceled" carries "cancel",
+    # "trigger_pending" carries "pending", "invalid" carries "invalid".
+    out = []
+    for row in session.order_book():
+        order = _order(
+            row,
+            id_keys=("orderNumber",),
+            status_keys=("status",),
+            # A partly-filled Firstock order reports status OPEN with a non-zero
+            # fillShares, so the quantities are what make it PARTIAL - not the
+            # word. map_status() consults them for exactly this case.
+            filled_keys=("fillShares",),
+            qty_keys=("quantity",),
+            price_keys=("averagePrice",),
+            reason_keys=("rejectReason",),
+        )
+        if order:
+            out.append(order)
+    return out
+
+
 register("angel", angel_orders)
 register("dhan", dhan_orders)
 register("kotak", kotak_orders)
 register("icici", icici_orders)
+register("firstock", firstock_orders)

@@ -20,6 +20,7 @@ import { defaultsColumns } from "@/screens/Settings";
 import { execDelay } from "@/lib/settingsActions";
 import { marketGate, marketGateSilent } from "@/lib/marketSession";
 import { useUiStore } from "@/stores/useUiStore";
+import { useStrategyStore } from "@/stores/useStrategyStore";
 import {
   useMarketStore,
   parseOptionSymbol,
@@ -179,7 +180,16 @@ function ExpiryTag({ expiry }: { expiry: string | undefined }) {
   return <span className="sym-exp" title={expiry}>• {label}</span>;
 }
 
-function PositionRow({ p, showRoll, onRoll }: { p: OptionPosition; showRoll: boolean; onRoll: (p: OptionPosition, dir: RollDirection) => void }) {
+function PositionRow({
+  p, showRoll, onRoll, colSpan, expanded, onToggleExpand,
+}: {
+  p: OptionPosition;
+  showRoll: boolean;
+  onRoll: (p: OptionPosition, dir: RollDirection) => void;
+  colSpan: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+}) {
   const closePosition = usePositionsStore((s) => s.closePosition);
   const setRisk = usePositionsStore((s) => s.setRisk);
   const partialExits = useSettingsStore((s) => s.active().order.partialExits);
@@ -192,9 +202,16 @@ function PositionRow({ p, showRoll, onRoll }: { p: OptionPosition; showRoll: boo
   const closed = p.status === "CLOSED";
 
   return (
+    <>
     <tr className={closed ? "closed" : ""}>
       <td className="c-inst">
         <div className="sym">
+          <PositionExpandToggle open={expanded} onToggle={onToggleExpand} />
+          {/* Paper/simulated trades are always manually placed — the Strategy
+              Engine only ever routes orders through LIVE (see
+              StrategyContext.place_order), so there is no ownership concept
+              here to look up; the badge is unconditionally "manual." */}
+          <PositionSourceBadge ownerInstanceId={null} />
           {p.underlying} {p.strike} {p.optType}
           <ExpiryTag expiry={p.expiry} />
           {closed && (
@@ -286,6 +303,8 @@ function PositionRow({ p, showRoll, onRoll }: { p: OptionPosition; showRoll: boo
         </td>
       )}
     </tr>
+    {expanded && <PositionStrategyDetail colSpan={colSpan} ownerInstanceId={null} />}
+    </>
   );
 }
 
@@ -697,6 +716,124 @@ function HedgeTag({ p }: { p: LivePosition }) {
   return null;
 }
 
+/** 👤 manual / 🤖 strategy — a small icon in place of a "Source" column, which
+ *  would cost horizontal space on every row for something only worth knowing
+ *  occasionally (see the expandable detail below for the rest). */
+function PositionSourceBadge({ ownerInstanceId }: { ownerInstanceId?: string | null }) {
+  return (
+    <span className="pos-source-badge" title={ownerInstanceId ? "Strategy trade" : "Manual trade"}>
+      {ownerInstanceId ? "🤖" : "👤"}
+    </span>
+  );
+}
+
+/** ▶/▼ affordance next to the badge — every row is expandable for visual
+ *  consistency, though a manual row's content underneath is just one line
+ *  ("Opened Manually"); a strategy row's is the richer panel below. */
+function PositionExpandToggle({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className="pos-expand-toggle"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-label={open ? "Collapse" : "Expand"}
+    >
+      {open ? "▼" : "▶"}
+    </button>
+  );
+}
+
+function currentRuleLabel(sl?: number | null, target?: number | null, tsl?: number): string {
+  if (tsl !== undefined && tsl !== null) return "Trailing Stop";
+  if (sl != null && target != null) return "Fixed SL/Target";
+  if (sl != null) return "Stop Loss";
+  return "No Rule";
+}
+
+/** The expanded sub-row under a position: "Opened Manually" for a manual
+ *  trade, or the owning strategy's snapshot + an "Open Strategy" jump for a
+ *  strategy-placed one. Joins client-side against the already-loaded
+ *  useStrategyStore — the position event only ever carries the owning
+ *  instance's id, never a full strategy snapshot. */
+function PositionStrategyDetail({
+  colSpan, ownerInstanceId, sl, target, tsl, openedTs,
+}: {
+  colSpan: number;
+  ownerInstanceId?: string | null;
+  sl?: number | null;
+  target?: number | null;
+  tsl?: number;
+  openedTs?: number | null;
+}) {
+  const inst = useStrategyStore((s) => (ownerInstanceId ? s.instances[ownerInstanceId] : undefined));
+  const specs = useStrategyStore((s) => s.specs);
+  const setScreen = useUiStore((s) => s.setScreen);
+  const setOpenStrategyInstanceId = useUiStore((s) => s.setOpenStrategyInstanceId);
+
+  if (!ownerInstanceId) {
+    return (
+      <tr className="pos-strategy-detail-row">
+        <td colSpan={colSpan}>
+          <div className="pos-strategy-detail">Opened Manually</div>
+        </td>
+      </tr>
+    );
+  }
+
+  const spec = inst ? specs.find((s) => s.name === inst.strategy) : undefined;
+  const name = inst
+    ? (inst.source === "discovered" ? inst.id : (spec?.label ?? inst.strategy))
+    : ownerInstanceId;
+
+  return (
+    <tr className="pos-strategy-detail-row">
+      <td colSpan={colSpan}>
+        <div className="pos-strategy-detail">
+          <div className="pos-strategy-detail-item">
+            <span className="pos-strategy-detail-key">Name</span>
+            <span>{name}</span>
+          </div>
+          <div className="pos-strategy-detail-item">
+            <span className="pos-strategy-detail-key">Status</span>
+            <span>Monitoring</span>
+          </div>
+          <div className="pos-strategy-detail-item">
+            <span className="pos-strategy-detail-key">Current Rule</span>
+            <span>{currentRuleLabel(sl, target, tsl)}</span>
+          </div>
+          {sl != null && (
+            <div className="pos-strategy-detail-item">
+              <span className="pos-strategy-detail-key">Current SL</span>
+              <span className="num">{sl.toFixed(2)}</span>
+            </div>
+          )}
+          {openedTs != null && (
+            <div className="pos-strategy-detail-item">
+              <span className="pos-strategy-detail-key">Started At</span>
+              <span>{new Date(openedTs).toLocaleTimeString()}</span>
+            </div>
+          )}
+          <div className="pos-strategy-detail-item">
+            <span className="pos-strategy-detail-key">Instance</span>
+            <span className="pos-strategy-detail-instance">{ownerInstanceId}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn-ghost pos-open-strategy"
+          onClick={() => {
+            setOpenStrategyInstanceId(ownerInstanceId);
+            setScreen("strategies");
+          }}
+        >
+          Open Strategy
+        </button>
+      </td>
+    </tr>
+  );
+}
+
 /** Live position row. Charticks-managed positions carry their SL / Target and
  *  the same partial-exit controls as paper; positions opened elsewhere are
  *  clearly marked and offer Manage / Ignore instead. */
@@ -705,11 +842,17 @@ function LivePositionRow({
   showRoll,
   onRoll,
   onAdopt,
+  colSpan,
+  expanded,
+  onToggleExpand,
 }: {
   p: LivePosition;
   showRoll: boolean;
   onRoll: (p: LivePosition, dir: RollDirection) => void;
   onAdopt: (p: LivePosition) => void;
+  colSpan: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
 }) {
   const setRisk = usePositionsStore((s) => s.setRisk);
   const closePosition = usePositionsStore((s) => s.closePosition);
@@ -731,9 +874,12 @@ function LivePositionRow({
   const rollable = managed && !exiting && (p.optType != null || parsed != null);
 
   return (
+    <>
     <tr className={`${managed ? "" : "unmanaged-row"} ${exiting ? "exiting-row" : ""}`}>
       <td className="c-inst">
         <div className="sym">
+          <PositionExpandToggle open={expanded} onToggle={onToggleExpand} />
+          <PositionSourceBadge ownerInstanceId={p.ownerInstanceId} />
           {p.symbol}
           <ExpiryTag expiry={p.expiry ?? parsed?.expiry} />
           <MonitorBadge p={p} />
@@ -823,6 +969,17 @@ function LivePositionRow({
         </td>
       )}
     </tr>
+    {expanded && (
+      <PositionStrategyDetail
+        colSpan={colSpan}
+        ownerInstanceId={p.ownerInstanceId}
+        sl={p.sl}
+        target={p.target}
+        tsl={p.tsl}
+        openedTs={p.openedTs}
+      />
+    )}
+    </>
   );
 }
 
@@ -890,16 +1047,27 @@ function OrphanedHedgeDialog() {
  *  trader most wants to look back at, and the application used to delete it the
  *  instant the position went flat — the Positions tab could not tell you what
  *  you had just done. */
-function ClosedPositionRow({ p, showRoll }: { p: ClosedPosition; showRoll: boolean }) {
+function ClosedPositionRow({
+  p, showRoll, colSpan, expanded, onToggleExpand,
+}: {
+  p: ClosedPosition;
+  showRoll: boolean;
+  colSpan: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+}) {
   const pnl = p.realised ?? 0;
   const held = p.openedTs && p.closedTs
     ? `${new Date(p.openedTs).toLocaleTimeString("en-GB")} → `
       + `${new Date(p.closedTs).toLocaleTimeString("en-GB")}`
     : undefined;
   return (
+    <>
     <tr className="closed-row">
       <td className="c-inst">
         <div className="sym">
+          <PositionExpandToggle open={expanded} onToggle={onToggleExpand} />
+          <PositionSourceBadge ownerInstanceId={p.ownerInstanceId} />
           {p.symbol}
           <ExpiryTag expiry={p.expiry} />
           <span className="mon-badge done" title={held}>✓ Closed</span>
@@ -922,6 +1090,17 @@ function ClosedPositionRow({ p, showRoll }: { p: ClosedPosition; showRoll: boole
       <td className="c-close" />
       {showRoll && <td className="c-roll" />}
     </tr>
+    {expanded && (
+      <PositionStrategyDetail
+        colSpan={colSpan}
+        ownerInstanceId={p.ownerInstanceId}
+        sl={p.sl}
+        target={p.target}
+        tsl={p.tsl}
+        openedTs={p.openedTs}
+      />
+    )}
+    </>
   );
 }
 
@@ -968,6 +1147,13 @@ function LivePositionGridPanel() {
   const [squaringOff, setSquaringOff] = useState(false);
   const [rollError, setRollError] = useState("");
   const unprotected = positions.filter((p) => p.managed !== true).length;
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   // Adapt a live position into the Roll Decider's target shape (same logic the
   // paper panel uses); non-option legs are filtered out before this runs. The
@@ -1057,6 +1243,9 @@ function LivePositionGridPanel() {
                 showRoll={showRoll}
                 onRoll={(position, dir) => setRolling({ position, dir })}
                 onAdopt={setAdopting}
+                colSpan={colCount}
+                expanded={expanded.has(p.id)}
+                onToggleExpand={() => toggleExpand(p.id)}
               />
             ))}
             {positions.length === 0 && closed.length === 0 && (
@@ -1078,7 +1267,14 @@ function LivePositionGridPanel() {
             )}
             {/* Newest first: the trade just finished is the one being looked at. */}
             {[...closed].reverse().map((p) => (
-              <ClosedPositionRow key={p.id} p={p} showRoll={showRoll} />
+              <ClosedPositionRow
+                key={p.id}
+                p={p}
+                showRoll={showRoll}
+                colSpan={colCount}
+                expanded={expanded.has(p.id)}
+                onToggleExpand={() => toggleExpand(p.id)}
+              />
             ))}
           </tbody>
         </table>
@@ -1200,6 +1396,13 @@ function MockPositionGridPanel() {
     (a, b) => (a.status === "OPEN" ? 0 : 1) - (b.status === "OPEN" ? 0 : 1),
   );
   const colCount = 7 + (showRoll ? 1 : 0);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   return (
     <section className="panel pos-grid-panel">
@@ -1263,7 +1466,15 @@ function MockPositionGridPanel() {
               <WorkingOrderRow key={o.id} o={o} showRoll={showRoll} />
             ))}
             {ordered.map((p) => (
-              <PositionRow key={p.id} p={p} showRoll={showRoll} onRoll={onRoll} />
+              <PositionRow
+                key={p.id}
+                p={p}
+                showRoll={showRoll}
+                onRoll={onRoll}
+                colSpan={colCount}
+                expanded={expanded.has(p.id)}
+                onToggleExpand={() => toggleExpand(p.id)}
+              />
             ))}
             {ordered.length === 0 && workingOrders.length === 0 && (
               <tr>

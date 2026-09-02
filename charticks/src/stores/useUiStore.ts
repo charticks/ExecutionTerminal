@@ -17,12 +17,17 @@ interface UiState {
   /** Working order the user asked to modify (from the duplicate-order dialog).
    *  The matching row in the Home position grid enters edit mode and clears this. */
   editOrderId: string | null;
+  /** Strategy instance id to jump to (from a Positions row's "Open Strategy"
+   *  action). The Strategies screen selects/expands it and clears this —
+   *  same handoff shape as editOrderId above. */
+  openStrategyInstanceId: string | null;
   setTheme: (t: Theme) => void;
   toggleTheme: () => void;
   setDensity: (d: Density) => void;
   setScreen: (s: Screen) => void;
   setMarketClosedNotice: (v: boolean | string) => void;
   setEditOrderId: (id: string | null) => void;
+  setOpenStrategyInstanceId: (id: string | null) => void;
 }
 
 // Defaults chosen with the user: cyan accent (in CSS), dark theme, compact density.
@@ -46,6 +51,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   screen: "home",
   marketClosedNotice: false,
   editOrderId: null,
+  openStrategyInstanceId: null,
   setTheme: (theme) => {
     apply(theme, get().density);
     set({ theme });
@@ -62,4 +68,5 @@ export const useUiStore = create<UiState>((set, get) => ({
   setScreen: (screen) => set({ screen }),
   setMarketClosedNotice: (marketClosedNotice) => set({ marketClosedNotice }),
   setEditOrderId: (editOrderId) => set({ editOrderId }),
+  setOpenStrategyInstanceId: (openStrategyInstanceId) => set({ openStrategyInstanceId }),
 }));

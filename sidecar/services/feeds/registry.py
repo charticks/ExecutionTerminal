@@ -13,6 +13,7 @@ from __future__ import annotations
 from .angel_feed import AngelFeed
 from .base import MarketFeed
 from .dhan_feed import DhanFeed
+from .firstock_feed import FirstockFeed
 from .icici_feed import ICICIFeed
 from .kotak_feed import KotakFeed
 
@@ -21,6 +22,7 @@ FEEDS: dict[str, type[MarketFeed]] = {
     "dhan": DhanFeed,
     "kotak": KotakFeed,
     "icici": ICICIFeed,
+    "firstock": FirstockFeed,
 }
 
 

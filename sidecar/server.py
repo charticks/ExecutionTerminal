@@ -36,8 +36,12 @@ from services.live_store import live_store
 from services.order_manager import order_manager
 from services.order_sync import order_sync
 from services.paper_engine import paper_engine
+from services.paths import strategies_dir
 from services.position_reconciler import reconciler
 from services.risk_engine import risk_engine
+from services.strategy_engine import discovery as strategy_discovery
+from services.strategy_engine.manager import strategy_manager
+import services.strategy_engine.strategies  # noqa: F401 — registers plugins
 from services.subscriptions import option_subs
 
 startup_profile.mark("imports-complete")
@@ -98,6 +102,44 @@ async def _startup() -> None:
     # Live trade management subscribes to the shared tick feed AND runs its own
     # periodic evaluation cycle, so stops keep evaluating when ticks do not.
     live_manager.start()
+    # Recreate every configured strategy instance and start whichever were
+    # auto-starting, AFTER live trade management is up: a strategy's entry
+    # order rides the exact same order_manager/live_manager pipeline a manual
+    # trade does, so that pipeline must already be ready. A strategy's own
+    # OPEN positions need no special recovery — they are ordinary
+    # SRC_CHARTICKS positions the reconciliation flow above already restores;
+    # this only reattaches which instance manages which.
+    # restore() already isolates every per-entry and per-instance failure
+    # internally; this is the outermost backstop, because a strategy engine
+    # that cannot come back up must never be the reason THE WHOLE SIDECAR
+    # fails to start — Live trade management above is already running by
+    # this point regardless of what happens here.
+    try:
+        strategy_restored = strategy_manager.restore()
+    except Exception as exc:
+        diagnostics.exception("strategy", "Strategy roster restore failed at startup",
+                              exc_info=exc)
+        strategy_restored = {}
+    if strategy_restored.get("restored"):
+        hub.publish(events.log_line(
+            "info", f"[strategies] restored {strategy_restored['restored']} "
+                    f"configured strategy instance(s), "
+                    f"{strategy_restored['started']} auto-started"))
+    # AFTER restore(): the roster it just recreated already contains every
+    # previously-discovered instance, so discover() here only ever adds
+    # instances for preset files that are genuinely new since the last run
+    # — never a duplicate of one restore() just brought back.
+    try:
+        discovered = strategy_discovery.discover(strategy_manager, strategies_dir())
+    except Exception as exc:
+        diagnostics.exception("strategy", "Preset discovery failed at startup",
+                              exc_info=exc)
+        discovered = {}
+    if discovered.get("created"):
+        hub.publish(events.log_line(
+            "info", f"[strategies] discovered {discovered['created']} new preset(s) "
+                    f"from strategies/"))
+    strategy_manager.start()
     # asyncio swallows exceptions from tasks nobody awaits; route them to
     # exceptions.log rather than the default stderr print that goes nowhere in
     # a packaged build.
@@ -116,6 +158,11 @@ async def _shutdown() -> None:
     bookkeeping — most importantly a stop that has just trailed — is in memory
     at any moment. On a clean exit there is no reason to lose it.
     """
+    # Strategies stop BEFORE live trade management, so nothing tries to place
+    # a new order while the pipeline underneath it is on its way down.
+    strategy_manager.stop_all()
+    strategy_manager.stop()
+    strategy_manager.flush_state()
     live_manager.stop()
     order_sync.stop()
     live_store.flush()
@@ -204,6 +251,17 @@ async def market_feed(authorization: str | None = Header(default=None)) -> JSONR
     status["feeds"] = broker_manager.router.status()
     status["adapterError"] = market_data.option_chain.last_error()
     return JSONResponse(status)
+
+
+@app.get("/order-feed")
+async def order_feed(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Firstock's order-update WebSocket, per connected account — separate from
+    /market-feed because it carries order events, not ticks, and from
+    /order-sync because this is the transport, not the tracked orders
+    themselves. Empty until a Firstock account is connected; no other broker
+    has one yet."""
+    _check_bearer(authorization)
+    return JSONResponse({"feeds": broker_manager.order_feed_status()})
 
 
 @app.get("/option-chain")
@@ -629,6 +687,94 @@ async def paper_reset(authorization: str | None = Header(default=None)) -> JSONR
     return JSONResponse({"ok": True})
 
 
+# ---- Strategies (control plane) ----
+# Every handler here is a thin pass-through to strategy_manager, exactly like
+# every other section in this file — no business logic lives in a handler.
+# Instance start/stop can subscribe candles and place a real order (Phase
+# 2/3), so both go through run_in_threadpool the same way orders/place does.
+@app.get("/strategies")
+async def strategies_list(authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_bearer(authorization)
+    from services.strategy_engine.registry import all_specs
+
+    return JSONResponse({
+        "specs": [s.to_dict() for s in all_specs()],
+        "instances": strategy_manager.list_instances(),
+    })
+
+
+@app.get("/strategies/{instance_id}")
+async def strategies_detail(instance_id: str,
+                            authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_bearer(authorization)
+    detail = strategy_manager.instance_detail(instance_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="no such strategy instance")
+    return JSONResponse(detail)
+
+
+@app.post("/strategies")
+async def strategies_create(body: dict, authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_bearer(authorization)
+    spec_name = body.get("strategy")
+    if not spec_name:
+        raise HTTPException(status_code=400, detail="strategy is required")
+    result = strategy_manager.create_instance(
+        spec_name, body.get("params") or {}, bool(body.get("autoStart")))
+    return JSONResponse(result)
+
+
+@app.post("/strategies/rescan")
+async def strategies_rescan(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Re-scan the project's strategies/ folder on demand — the explicit
+    counterpart to the automatic scan at startup, for a preset file added
+    or edited while the app is already running (see discovery.py's own
+    docstring for why an edited file has no effect on an already-discovered
+    instance)."""
+    _check_bearer(authorization)
+    result = await run_in_threadpool(
+        strategy_discovery.discover, strategy_manager, strategies_dir())
+    return JSONResponse(result)
+
+
+@app.post("/strategies/{instance_id}/update")
+async def strategies_update(instance_id: str, body: dict,
+                            authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Replace a stopped instance's configured params — the "Edit" action.
+    Refuses (STILL_RUNNING) while the instance is running, same as
+    /remove — see StrategyManager.update_params."""
+    _check_bearer(authorization)
+    result = strategy_manager.update_params(instance_id, body.get("params") or {})
+    return JSONResponse(result)
+
+
+@app.post("/strategies/{instance_id}/start")
+async def strategies_start(instance_id: str,
+                           authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_bearer(authorization)
+    result = await run_in_threadpool(strategy_manager.start_instance, instance_id)
+    return JSONResponse(result)
+
+
+@app.post("/strategies/{instance_id}/stop")
+async def strategies_stop(instance_id: str,
+                          authorization: str | None = Header(default=None)) -> JSONResponse:
+    _check_bearer(authorization)
+    result = await run_in_threadpool(strategy_manager.stop_instance, instance_id)
+    return JSONResponse(result)
+
+
+@app.post("/strategies/{instance_id}/remove")
+async def strategies_remove(instance_id: str,
+                            authorization: str | None = Header(default=None)) -> JSONResponse:
+    # POST, not DELETE: every other action endpoint in this file is POST
+    # (see /brokers/disconnect, /positions/close, /paper/reset, ...) — one
+    # lone DELETE verb would be the only exception to that convention.
+    _check_bearer(authorization)
+    result = strategy_manager.remove_instance(instance_id)
+    return JSONResponse(result)
+
+
 # ---- Broker connectivity (control plane) ----
 # Accounts + encrypted credentials are owned by the Electron main process. The
 # renderer forwards decrypted credentials here per account; the sidecar keeps
@@ -716,6 +862,12 @@ async def stream(ws: WebSocket) -> None:
         # window that reloads mid-alarm must not come back looking calm.
         live_book.republish()
         live_manager.republish_alarm()
+        # Same reasoning, for strategy instances: status is published on
+        # transitions only, and a just-opened Strategies page must show every
+        # configured instance (and its recent logs) immediately, not wait for
+        # the next state change to happen to occur after it connected.
+        for event in strategy_manager.snapshot_events():
+            await ws.send_json(event)
         while True:
             event = await q.get()
             await ws.send_json(event)

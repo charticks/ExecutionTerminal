@@ -63,6 +63,7 @@ class FeedRouter:
         self.last_unmapped_token: str | None = None
 
         self._option_tick_listeners: list[Any] = []
+        self._index_tick_listeners: list[Any] = []
 
     # ── lifecycle, driven by broker connect/disconnect ────────────────────
     def attach(self, account_id: str, broker: str) -> MarketFeed | None:
@@ -180,6 +181,11 @@ class FeedRouter:
             return
         self.index_ltp[symbol] = ltp
         hub.publish(events.index_quote(symbol, round(ltp, 2), round(change_pct, 2)))
+        for fn in self._index_tick_listeners:
+            try:
+                fn(symbol, ltp)
+            except Exception as e:
+                self._log("warn", f"[index] tick listener error: {e}")
 
     def on_option_tick(self, feed: MarketFeed, key: InstrumentKey, ltp: float,
                        volume: int | None, bid: float | None, ask: float | None,
@@ -213,6 +219,13 @@ class FeedRouter:
     # ── read model ────────────────────────────────────────────────────────
     def add_option_tick_listener(self, fn: Any) -> None:
         self._option_tick_listeners.append(fn)
+
+    def add_index_tick_listener(self, fn: Any) -> None:
+        """fn(symbol: str, ltp: float) — same shape and guarantees as
+        add_option_tick_listener, for consumers that need the underlying
+        index rather than an option contract (e.g. a strategy's spot-based
+        candles)."""
+        self._index_tick_listeners.append(fn)
 
     def subscribe_option_keys(self, keys: set) -> None:
         """Hand the desired option set, as canonical keys, to whichever feed

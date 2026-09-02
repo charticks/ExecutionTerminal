@@ -196,6 +196,111 @@
 .pop-action.danger { color: var(--down); }
 .pop-action.danger:hover { background: var(--down-bg); }
 
+/* ---- Strategies — control-center master/detail layout ---- */
+.strategy-summary-bar {
+  display: flex; align-items: center; gap: 16px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.strategy-summary-bar b { color: var(--text); font-weight: 700; margin-left: 4px; }
+.strategy-summary-error { color: var(--down); }
+.strategy-summary-error b { color: var(--down); }
+
+.strategy-split { display: flex; height: 100%; min-height: 0; }
+.strategy-pane-list {
+  width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--border);
+}
+.strategy-pane-detail {
+  flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px;
+}
+.strategy-detail-empty { padding: 24px 14px; }
+
+.strategy-search {
+  display: flex; align-items: center; gap: 8px; margin: 10px 10px 4px;
+  padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-strong);
+  background: var(--panel-2); color: var(--text-faint);
+}
+.strategy-search input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text); font: inherit; font-size: 12.5px;
+}
+
+.strategy-tree { flex: 1; overflow-y: auto; padding: 6px; min-height: 0; }
+.strategy-group { margin-bottom: 2px; }
+.strategy-group-header {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; padding: 7px 8px; margin: 0;
+  font: inherit; font-size: 12px; font-weight: 650; color: var(--text-dim);
+  text-align: left; cursor: pointer; border-radius: 6px;
+}
+.strategy-group-header:hover { background: var(--panel-2); color: var(--text); }
+.strategy-group-count { color: var(--text-faint); font-weight: 400; }
+.tree-caret {
+  display: inline-block; font-size: 9px; color: var(--text-faint);
+  transition: transform .12s ease;
+}
+.tree-caret.open { transform: rotate(90deg); }
+
+.strategy-tree-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; padding: 7px 8px 7px 26px; margin: 0;
+  font: inherit; text-align: left; cursor: pointer; border-radius: 6px;
+}
+.strategy-tree-row:hover { background: var(--panel-2); }
+.strategy-tree-row.active { background: var(--accent-soft); }
+.strategy-tree-row-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 12.5px; color: var(--text);
+}
+.strategy-tree-row-pnl { font-size: 11px; flex: none; }
+
+.strategy-detail-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.strategy-detail-head .d { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.strategy-detail-head h4 { margin: 0; font-size: 14px; }
+.strategy-detail-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px; margin-bottom: 12px;
+}
+.strategy-detail-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.strategy-detail-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); }
+.strategy-detail-instance { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.strategy-detail-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.strategy-detail-actions button:disabled { opacity: 0.45; cursor: default; }
+
+.strategy-row-detail {
+  margin: 0 0 10px; padding: 6px 9px;
+  border-left: 2px solid var(--down); border-radius: 0 5px 5px 0;
+  background: var(--down-bg); color: var(--down);
+  font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere;
+}
+.strategy-logs {
+  margin: 0 0 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); max-height: 220px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px;
+}
+.strategy-log-row { display: flex; gap: 8px; padding: 2px 0; }
+.strategy-log-ts { color: var(--text-faint); flex: none; }
+.strategy-log-row.lvl-warn .strategy-log-msg { color: var(--amber, #f5a623); }
+.strategy-log-row.lvl-error .strategy-log-msg { color: var(--down); }
+.strategy-config {
+  margin: 0 0 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); max-height: 220px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px;
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 12px;
+}
+.strategy-config-row { display: contents; }
+.strategy-config-key { color: var(--text-faint); }
+.strategy-config-val { color: var(--text); overflow-wrap: anywhere; }
+.strategy-rescan-note { font-size: 11.5px; color: var(--text-dim); }
+.strategy-spec-desc { font-size: 11.5px; color: var(--text-dim); margin: -4px 0 12px; line-height: 1.4; }
+.strategy-autostart {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  font-size: 12px; color: var(--text-dim); cursor: pointer;
+}
+.empty.small { padding: 12px; font-size: 11.5px; }
+
 /* ---- Broker dialogs ---- */
 .broker-modal { max-width: 380px; width: 92vw; }
 .fld { display: flex; flex-direction: column; gap: 5px; margin-bottom: 11px; }
@@ -451,6 +556,27 @@
 .pos-grid .c-inst .sym,
 .pos-grid .c-inst .sub { white-space: nowrap; }
 .closed-tag { margin-left: 8px; }
+
+/* Source indicator (manual/strategy) + expand toggle, in place of a "Source"
+ * column — see the Strategy & Positions UI redesign. */
+.pos-expand-toggle {
+  background: none; border: none; padding: 0; margin: 0 4px 0 0;
+  font-size: 9px; color: var(--text-faint); cursor: pointer; vertical-align: 1px;
+}
+.pos-expand-toggle:hover { color: var(--text); }
+.pos-source-badge { margin-right: 5px; font-size: 12px; vertical-align: -1px; }
+.pos-strategy-detail-row td {
+  padding: 10px 16px 12px; background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.pos-strategy-detail {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 14px;
+  font-size: 11.5px; max-width: 420px;
+}
+.pos-strategy-detail-item { display: contents; }
+.pos-strategy-detail-key { color: var(--text-faint); }
+.pos-strategy-detail-instance { font-family: var(--mono); overflow-wrap: anywhere; }
+.pos-open-strategy { margin-top: 10px; }
 
 /* ---- Position monitoring state ----
    A position Charticks is not actively protecting must never read like one it

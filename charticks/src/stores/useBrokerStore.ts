@@ -6,6 +6,15 @@ import type { AccountHealth, BrokerAccount, Credentials } from "@/bridge/brokers
 import { isPredefinedBroker } from "@/bridge/brokers";
 import type { ConnectionHealthState } from "@/bridge/events";
 
+/** An exception as a line worth putting in a tooltip. `String(e)` on an Error
+ *  yields "Error: ..." and on anything else can yield "[object Object]", which
+ *  tells a user nothing about what to do next. */
+function errorText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  const text = String(e);
+  return text === "[object Object]" ? "the request failed with no message" : text;
+}
+
 interface BrokerStatusResponse {
   status: Record<string, { health: AccountHealth["health"]; detail?: string | null; broker?: string }>;
 }
@@ -128,7 +137,15 @@ export const useBrokerStore = create<BrokerState>((set, get) => ({
             set((s) => ({ health: { ...s.health, [id]: { health: "session_expired", detail: res.error } } }));
           }
         } catch (e) {
-          set((s) => ({ health: { ...s.health, [id]: { health: "down", detail: String(e) } } }));
+          // Whatever went wrong, this account must not be left showing
+          // "Connecting..." — an optimistic state with no terminal state to
+          // follow it is a screen the user cannot act on or even distrust.
+          set((s) => ({
+            health: {
+              ...s.health,
+              [id]: { health: "down", detail: errorText(e) },
+            },
+          }));
         }
       }),
     );

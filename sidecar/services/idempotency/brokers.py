@@ -114,6 +114,25 @@ register(BrokerIdem(
     max_len=20,
 ))
 
+# Firstock — `remarks` is MANDATORY on placement and comes back on the order
+# book row, so the client id makes the round trip. No lookup-by-id endpoint
+# exists, which puts this on the tag-echo tier alongside Kotak and ICICI.
+register(BrokerIdem(
+    broker="firstock",
+    tier=Tier.TAG_ECHO,
+    accepts_client_id=True,               # placeOrder's `remarks`
+    tag_keys=("remarks",),
+    # Raw rows, deliberately: the sync engine's mapper DROPS a row whose status
+    # word it does not recognise, and a dropped row would read as "order absent"
+    # and authorise a duplicate.
+    rows=lambda s: s.order_book(),
+    id_keys=("orderNumber",),
+    symbol_keys=("tradingSymbol",),
+    side_keys=("transactionType",),
+    qty_keys=("quantity",),
+    max_len=20,
+))
+
 # Angel One — SmartAPI's order params carry no client id and its order book has
 # no client field, so this is the attribute tier: a resent order is recognised
 # by contract, side and quantity. Weaker than the others by the broker's design,

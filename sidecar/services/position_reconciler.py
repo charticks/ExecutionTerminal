@@ -170,13 +170,19 @@ class PositionReconciler:
         ltp = next((r.ltp for r in group if r.ltp > 0), 0.0)
         account = group[0].account_id
         broker = group[0].broker
+        # Whichever row actually names one. A position held across several
+        # accounts is rare and, when it happens, every leg is opened the same
+        # way in practice — there is no meaningful way to "net" a product code
+        # the way quantity nets, so the first answer is taken as the answer.
+        product = next((r.product for r in group if r.product), "")
 
         with self._lock:
             self._misses.pop(key.position_id, None)
 
         existing = live_book.get(key.position_id)
         if existing is not None:
-            note = live_book.apply_broker(key, side, qty, avg, account, broker)
+            note = live_book.apply_broker(key, side, qty, avg, account, broker,
+                                          product)
             if note:
                 diagnostics.event(
                     "orders", "Position reconciled", "adjusted", level="warn",
@@ -184,7 +190,8 @@ class PositionReconciler:
                     change=note, reason="broker book is authoritative on size")
             return
         live_book.upsert_external(key, side, qty, avg, ltp,
-                                  self._lots_for(key, qty), account, broker)
+                                  self._lots_for(key, qty), account, broker,
+                                  product)
 
     @staticmethod
     def _lots_for(key: InstrumentKey, qty: int) -> int:

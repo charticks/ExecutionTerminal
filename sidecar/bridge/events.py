@@ -109,6 +109,27 @@ def paper_state(orders: list, trades: list, positions: list, net_pnl: float) -> 
             "positions": positions, "netPnl": net_pnl, "ts": _now_ms()}
 
 
+def strategy_status(instance: dict) -> dict:
+    """One strategy instance's roster/lifecycle snapshot — id, spec name,
+    params, autoStart, state, error, timestamps. Full state in the event
+    (mirrors broker_status), so the renderer can merge it straight in rather
+    than refetching. `instance` may carry `removed: True`, in which case the
+    renderer drops the row instead of updating it."""
+    return {"type": "strategy_status", **instance, "ts": _now_ms()}
+
+
+def strategy_pnl(pnls: dict) -> dict:
+    """Combined open P&L per RUNNING strategy instance, pushed once per
+    evaluation cycle — {instanceId: pnl}. One event for every running
+    instance rather than one event each, since this fires every ~1s."""
+    return {"type": "strategy_pnl", "pnls": pnls, "ts": _now_ms()}
+
+
+def strategy_log(instance_id: str, strategy: str, level: str, message: str) -> dict:
+    return {"type": "strategy_log", "instanceId": instance_id, "strategy": strategy,
+            "level": level, "message": message, "ts": _now_ms()}
+
+
 def connection_health(state: str, accounts_connected: int, detail: str | None = None) -> dict:
     """Aggregate connectivity state for the header badge — published by
     services.reliability.health_monitor on state transitions only.

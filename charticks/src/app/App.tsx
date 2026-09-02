@@ -3,12 +3,13 @@ import { Rail } from "./Rail";
 import { StatusBar } from "./StatusBar";
 import { Home } from "@/screens/Home";
 import { Orders } from "@/screens/Orders";
+import { Strategies } from "@/screens/Strategies";
 import { Brokers } from "@/screens/Brokers";
 import { Settings } from "@/screens/Settings";
-import { Placeholder } from "@/screens/Placeholder";
 import { useUiStore } from "@/stores/useUiStore";
 import { connectMarketStore } from "@/stores/useMarketStore";
 import { connectBrokerStore } from "@/stores/useBrokerStore";
+import { connectStrategyStore } from "@/stores/useStrategyStore";
 import { startLiveChain } from "@/stores/useLiveChain";
 import { syncTradingMode } from "@/stores/useTradingModeStore";
 import { syncRiskConfig } from "@/stores/useRiskSync";
@@ -60,6 +61,7 @@ export function App() {
       };
       step("market-store", connectMarketStore);     // opens the WebSocket
       step("broker-store", connectBrokerStore);     // stored accounts, then auto-connect
+      step("strategy-store", connectStrategyStore); // configured strategy instances
       // Before anything can size an order: lot sizes come from the engine's
       // instrument master, not the shipped table (see useContractSpecs).
       step("contract-specs", startContractSpecs);
@@ -100,7 +102,7 @@ export function App() {
       <main className="work">
         {screen === "home" && <Home />}
         {screen === "orders" && <Orders />}
-        {screen === "strategies" && <Placeholder title="Strategies" />}
+        {screen === "strategies" && <Strategies />}
         {screen === "brokers" && <Brokers />}
         {screen === "settings" && <Settings />}
       </main>

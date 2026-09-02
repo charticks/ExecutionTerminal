@@ -46,6 +46,13 @@ export interface Position {
   /** The hedge covering this short, and — on a hedge — the shorts it covers. */
   hedgedBy?: string | null;
   hedgeFor?: string[] | null;
+  /** Epoch ms this position was opened — already sent for OPEN rows too
+   *  (LivePosition.to_dict() always carries it), just not declared here
+   *  until now. */
+  openedTs?: number | null;
+  /** The strategy instance that placed this position, if any — null/absent
+   *  for a manually-opened trade. */
+  ownerInstanceId?: string | null;
 }
 
 /** A completed live trade, kept as this session's history.
@@ -56,8 +63,7 @@ export interface Position {
 export interface ClosedPosition extends Position {
   /** Fill price of the closing order. */
   exit?: number | null;
-  /** Epoch ms. */
-  openedTs?: number | null;
+  /** Epoch ms. `openedTs` is inherited from Position now. */
   closedTs?: number | null;
   /** Booked P&L for this trade. */
   realised?: number | null;
@@ -165,7 +171,8 @@ export const useMarketStore = create<MarketState>((set) => ({
   connected: false,
   indices: {},
   positions: {},
-  brokers: { angel: "down", kotak: "down", dhan: "down", icici: "down" },
+  brokers: { angel: "down", kotak: "down", dhan: "down", icici: "down",
+             firstock: "down" },
   netPnl: 0,
   riskHalted: false,
   monitorAlarm: [],

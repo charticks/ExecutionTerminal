@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently -k -n VITE,SIDECAR -c cyan,green \"npm:dev:vite\" \"npm:dev:sidecar\"",
     "dev:vite": "vite",
-    "dev:sidecar": "cd ../sidecar && python -m uvicorn server:app --host 127.0.0.1 --port 8787 --reload",
+    "dev:sidecar": "node ../scripts/check-sidecar-port.mjs 8787 && cd ../sidecar && python -m uvicorn server:app --host 127.0.0.1 --port 8787 --reload",
     "build": "npm run build:runtime && tsc -b && vite build && electron-builder",
     "typecheck": "tsc -b --noEmit",
     "build:runtime": "node ../scripts/build-runtime.mjs"
@@ -46,6 +46,11 @@
         "from": "../sidecar",
         "to": "sidecar",
         "filter": ["**/*", "!logs/**", "!**/*.log", "!data_cache/**", "!tests/**"]
+      },
+      {
+        "from": "../strategies",
+        "to": "strategies",
+        "filter": ["**/*.json"]
       }
     ],
     "win": { "target": "nsis" }

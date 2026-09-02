@@ -795,15 +795,21 @@ class LiveManager:
 
         from services.order_manager import order_manager
 
+        # Lots actually being exited, not the position's TOTAL lots: `qty`
+        # here can be less than `pos.qty` (a partial exit, an adjust-lots
+        # reduce), and passing the total told risk_engine.rule_lot_size this
+        # order was `pos.lots` lots of a different, larger quantity than the
+        # one actually being sent — an internally-inconsistent order that
+        # rule rejects. Falls back to `pos.lots` when the lot size is unknown
+        # (a position whose contract no loaded master lists), preserving the
+        # original behaviour for that case: raw-quantity splitting rather
+        # than claiming the whole position is one lot.
+        lot_size = int(pos.qty / pos.lots) if pos.lots else 0
+        lots = qty // lot_size if lot_size > 0 else pos.lots
         try:
             result = order_manager.place_exit(
                 pos.underlying, pos.expiry, pos.strike, pos.opt_type,
-                # Lots, not `lots or 1`: an unknown lot count (a position found
-                # in the broker's book whose contract no loaded master lists)
-                # must fall through to raw-quantity splitting rather than claim
-                # the whole position is one lot, which would size the children
-                # from a lot size of `qty`.
-                exit_side, qty, pos.lots, reason=reason,
+                exit_side, qty, lots, reason=reason,
                 position_key=pos.key)
         except Exception as exc:
             live_book.end_exit(pos.key)

@@ -28,6 +28,17 @@ _SESSION_EXPIRED_MARKERS = (
     "could not authenticate credentials",
     "session key",
     "api session",
+    # Firstock: the websocket handshake answers a dead jKey with
+    # {"status":"failed","message":"unauthenticated"}. Without this marker the
+    # feed would classify it as "unknown" and retry the same dead session
+    # forever instead of handing it to session recovery.
+    "unauthenticated",
+    # Firstock REST: every authenticated endpoint answers a dead session with
+    # name="INVALID_JKEY". Matched on the machine-readable name rather than the
+    # prose, exactly as Angel is matched on AG8001 — a bare "jkey" would also
+    # catch "jKey is required", which is our own bug and must not trigger a
+    # re-login.
+    "invalid_jkey",
 )
 
 # Substrings that indicate a transient network/connectivity issue rather than
@@ -58,12 +69,24 @@ def _text_of(exc_or_response: Any) -> str:
     return str(exc_or_response).lower()
 
 
+# Checked BEFORE the session markers, and wins over them. Firstock reports a
+# rejected source address as "UNAUTHORIZED: Invalid IP Address", which contains
+# a session marker but is not a session problem: re-authenticating repeats the
+# request from the same address and fails identically, forever. A wall is not a
+# closed door.
+_NEVER_SESSION_MARKERS = (
+    "invalid ip address",
+)
+
+
 def classify_error(exc_or_response: Any) -> Classification:
     """Classify a broker exception/response dict as session_expired, network,
     or unknown. Callers use this to decide whether to trigger the
     re-authentication + reconnect workflow (session_expired) versus a plain
     retry (network) versus just logging (unknown)."""
     text = _text_of(exc_or_response)
+    if any(marker in text for marker in _NEVER_SESSION_MARKERS):
+        return "unknown"
     if any(marker in text for marker in _SESSION_EXPIRED_MARKERS):
         return "session_expired"
     if any(marker in text for marker in _NETWORK_MARKERS):

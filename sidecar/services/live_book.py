@@ -271,6 +271,22 @@ def _hedge_labels(position_key: str) -> dict:
         return {}
 
 
+def _owner_instance_id(position_key: str) -> str | None:
+    """Which strategy instance (if any) placed this position — lazy-imported
+    the same way `_hedge_labels` is, for the same reason: `live_book` sits
+    below `strategy_engine` in the import graph (strategy_engine already
+    imports live_book), so the reverse link can only be a deferred import
+    made right where it's needed, never a module-level one. Failure-tolerant
+    for the same reason too: a lookup problem here must never stop a
+    position from reaching the screen."""
+    try:
+        from services.strategy_engine.manager import strategy_manager
+
+        return strategy_manager.owner_of(position_key)
+    except Exception:
+        return None
+
+
 class LiveBook:
     """Thread-safe. Written from confirmed fills and broker reconciliation,
     read by risk validation and the live manager."""
@@ -495,11 +511,18 @@ class LiveBook:
 
     def upsert_external(self, key: InstrumentKey, side: str, qty: int,
                         avg_entry: float, ltp: float, lots: int,
-                        account_id: str, broker: str) -> LivePosition | None:
+                        account_id: str, broker: str,
+                        product: str = "") -> LivePosition | None:
         """Record a position found in the broker's book that Charticks did not
         open. Never managed: it is displayed, counted toward exposure limits and
         can be squared off, but no stop, target or trail is invented for it.
-        The user adopts it explicitly (see ``adopt``) or leaves it alone."""
+        The user adopts it explicitly (see ``adopt``) or leaves it alone.
+
+        `product` is carried through even though nothing here manages the
+        position: it is what Roll and Adjust Lots route the order under the
+        moment the user DOES adopt it, and defaulting to NRML there would
+        silently turn an adopted intraday position into a carry-forward order.
+        """
         if qty <= 0:
             return None
         pid = key.position_id
@@ -514,6 +537,7 @@ class LiveBook:
                     qty=qty, lots=lots, avg_entry=avg_entry, ltp=ltp,
                     source=SRC_EXTERNAL, managed=False,
                     account_id=account_id, broker=broker,
+                    product=(product or "NRML").upper(),
                     monitor=UNMANAGED,
                     monitor_detail="opened outside Charticks — no stop loss, "
                                    "target or trail is being applied")
@@ -529,6 +553,8 @@ class LiveBook:
                 if ltp > 0:
                     pos.ltp = ltp
                 pos.account_id, pos.broker = account_id, broker
+                if product:
+                    pos.product = product.upper()
             pos.verified_ts = time.time()
             snapshot = copy(pos)
         self._publish(snapshot)
@@ -536,7 +562,7 @@ class LiveBook:
 
     def apply_broker(self, key: InstrumentKey, side: str, qty: int,
                      avg_entry: float, account_id: str = "",
-                     broker: str = "") -> str | None:
+                     broker: str = "", product: str = "") -> str | None:
         """Apply the broker's own figures to a position we already hold. The
         broker is the authority on quantity: a size we disagree with is adopted
         from it, not argued with, because every automated exit is sized from
@@ -580,6 +606,16 @@ class LiveBook:
                 # A quantity that shrank may be smaller than the exit we have in
                 # flight; never let the claim exceed what is held.
                 pos.exit_pending_qty = min(pos.exit_pending_qty, pos.qty)
+                # A quantity change means the broker just recomputed its own
+                # blended cost basis (an external average-in or a partial exit),
+                # so it is adopted here too — MTM and realised P&L are wrong
+                # otherwise. This does NOT call _apply_rule: SL/Target/Trail are
+                # absolute price levels once derived, and a shifted cost basis
+                # is not a reason to move them — only a side flip is.
+                if avg_entry > 0 and abs(avg_entry - pos.avg_entry) > 1e-6:
+                    note = (f"{note}, " if note else "") + \
+                        f"entry {pos.avg_entry:.2f}→{avg_entry:.2f}"
+                    pos.avg_entry = avg_entry
             if avg_entry > 0 and pos.avg_entry <= 0:
                 # Only fill a gap. A broker's average is its own accounting of
                 # the whole day; ours is the cost basis the SL and Target were
@@ -587,6 +623,10 @@ class LiveBook:
                 pos.avg_entry = avg_entry
                 self._apply_rule(pos)
                 note = (f"{note}, " if note else "") + "entry price learned from broker"
+            if product and product.upper() != pos.product:
+                note = (f"{note}, " if note else "") + \
+                    f"product {pos.product}→{product.upper()}"
+                pos.product = product.upper()
         if note:
             self._persist()
         return note
@@ -790,6 +830,7 @@ class LiveBook:
             # with what it protects, and the short with the fact that it is
             # covered. See services/hedge.py.
             **_hedge_labels(pos.key),
+            "ownerInstanceId": _owner_instance_id(pos.key),
             "account": pos.account_id or None,
             "broker": pos.broker or None,
             "closed": closed,

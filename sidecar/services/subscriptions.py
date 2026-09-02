@@ -36,6 +36,11 @@ from services.instruments import InstrumentKey
 CHAIN = "chain"
 LIVE = "live"
 PAPER = "paper"
+# A strategy instance's signal-watching subscriptions — contracts it wants
+# ticks for before any position exists, so they must not be dropped just
+# because nothing is open on them yet (the same reasoning LIVE gets its own
+# source for, see the module docstring).
+STRATEGY = "strategy"
 
 
 class OptionSubscriptionHub:

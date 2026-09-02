@@ -147,6 +147,17 @@ async function startSidecarWithPort(): Promise<void> {
     SIDECAR_PORT = 8787;
     mark("sidecar:dev-mode", "managed by npm script on 8787");
     console.log("[sidecar] dev mode — managed by npm script, not spawning");
+    // The port is settled, so the renderer may have it. WITHOUT THIS, dev
+    // deadlocks: `bridge:config` awaits `portReady`, so every renderer call —
+    // REST and WebSocket alike — hangs before it is even sent. No request
+    // reaches the sidecar, nothing throws, and the UI sits mid-action forever
+    // with nothing to read. It cost an afternoon of hunting a broker bug that
+    // was never there, because the sidecar logs stay silent when the request
+    // never leaves the renderer.
+    //
+    // Dev returns early because it has no sidecar to SPAWN — not because it
+    // has no port. The port is the part the renderer is waiting on.
+    markPortReady();
     return;
   }
   try {
@@ -652,7 +663,7 @@ const portReady = new Promise<void>((resolve) => { markPortReady = resolve; });
 // renderer never receives secrets except transiently, just before a connect.
 // ---------------------------------------------------------------------------
 // Predefined SDK brokers; custom brokers store their own key string here.
-type BrokerId = "angel" | "kotak" | "dhan" | "icici";
+type BrokerId = "angel" | "kotak" | "dhan" | "icici" | "firstock";
 interface StoredAccount {
   id: string;
   broker: BrokerId | string;

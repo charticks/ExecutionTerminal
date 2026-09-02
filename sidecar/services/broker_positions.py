@@ -69,6 +69,24 @@ def _first_positive(row: dict, keys: tuple[str, ...],
     return 0.0
 
 
+def _first_present(row: dict, keys: tuple[str, ...]) -> Any:
+    """First of `keys` that parses to a number, sign preserved.
+
+    The counterpart to `_first_positive` for quantities that may legitimately be
+    NEGATIVE — P&L above all. Using the positive-only helper for those reports
+    every losing position as flat.
+    """
+    for key in keys:
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def _key_for(broker: str, token: Any, symbol: str) -> InstrumentKey | None:
     if token:
         key = instruments.key_for(broker, str(token))
@@ -226,7 +244,86 @@ def _icici_key(underlying: str, expiry: str, strike: Any,
         return None
 
 
-_READERS = {"angel": _angel, "dhan": _dhan, "kotak": _kotak, "icici": _icici}
+def _firstock_key(row: dict) -> InstrumentKey | None:
+    """Resolve a Firstock position row to a canonical key, by token only.
+
+    The composite "EXCHANGE:TOKEN" is tried first because that is what the
+    scrip master binds as the primary id and it cannot collide across venues;
+    the bare token is registered as an alias and covers a row that omits the
+    exchange.
+
+    There is deliberately NO tradingsymbol fallback. Firstock writes an option
+    three different ways (NIFTY29SEP26C29150 on NFO, BANKEX26AUG54000CE and
+    SENSEX26O0170700CE on BFO) and InstrumentKey.from_symbol parses none of
+    them — it expects CE/PE at the end. Calling it would return None at best and
+    match the WRONG contract at worst, and an exit is sized and routed from this
+    key. An unresolved row is reported as an unmanaged foreign position, which
+    is honest.
+    """
+    token = str(row.get("token") or "").strip()
+    if not token:
+        return None
+    exchange = str(row.get("exchange") or "").strip().upper()
+    if exchange:
+        key = instruments.key_for("firstock", f"{exchange}:{token}")
+        if key is not None:
+            return key
+    return instruments.key_for("firstock", token)
+
+
+def _firstock(account_id: str, sess: Any) -> list[BrokerPosition]:
+    """Firstock's position book -> canonical rows.
+
+    Cost basis has to be ASSEMBLED. `netAveragePrice` reads "0.00" even on a
+    position with trades in Firstock's own documented sample, so the side
+    actually held is consulted next, and the carry-forward leg after that. Using
+    an `or` chain would stop at the first FIELD rather than the first ANSWER,
+    because the string "0.00" is truthy — the bug that left every Angel short
+    with a zero entry and made it impossible to adopt.
+    """
+    from services.feeds.firstock_client import PRODUCT
+
+    reverse_product = {code: name for name, code in PRODUCT.items()}
+    out: list[BrokerPosition] = []
+    for p in sess.positions():
+        if not isinstance(p, dict):
+            continue
+        qty = int(_f(p.get("netQuantity")))
+        if qty == 0:
+            continue
+        long_side = qty > 0
+        avg = _f(_first_positive(
+            p,
+            ("netAveragePrice",),
+            fallback=("dayBuyAveragePrice",) if long_side else ("daySellAveragePrice",)))
+        if avg <= 0:
+            # Carry-forward leg: Firstock reports it as an amount, not a price.
+            amount = _f(p.get("cfBuyAmt" if long_side else "cfSellAmt"))
+            carried = _f(p.get("cfBuyQty" if long_side else "cfSellQty"))
+            if amount > 0 and carried > 0:
+                avg = amount / carried
+        symbol = str(p.get("tradingSymbol") or "")
+        out.append(BrokerPosition(
+            account_id=account_id, broker="firstock",
+            raw_id=str(p.get("token") or symbol), symbol=symbol,
+            side="BUY" if long_side else "SELL", qty=abs(qty),
+            avg_entry=round(avg, 2),
+            ltp=round(_f(p.get("lastTradedPrice")), 2),
+            # NOT _first_positive: that helper exists for PRICES, which are
+            # always positive, and it treats anything <= 0 as "field absent".
+            # P&L is routinely negative, and running it through there would
+            # report every losing position as flat.
+            pnl=round(_f(_first_present(p, ("totalPNL", "totalMTM", "RealizedPNL"))), 2),
+            key=_firstock_key(p),
+            # Translated BACK into Charticks' model: the rest of the app knows
+            # NRML/MIS/CNC, and leaking "M" into a grid the user reads would be
+            # the adapter failing in the other direction.
+            product=reverse_product.get(str(p.get("product") or "").upper(), "")))
+    return out
+
+
+_READERS = {"angel": _angel, "dhan": _dhan, "kotak": _kotak,
+            "icici": _icici, "firstock": _firstock}
 
 
 def supported(broker: str) -> bool:

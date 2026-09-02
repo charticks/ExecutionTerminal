@@ -38,14 +38,15 @@ from services.broker_limits import limit_resolver
 from services.instruments import InstrumentKey, instruments
 from services.feed_router import FeedRouter
 from services.paths import data_dir
+from services.reliability.errors import classify_error
 from services.reliability.session_manager import SessionManager
 from services.reliability.subscription_registry import SubscriptionRegistry
 from services.reliability.health_monitor import ConnectionHealthMonitor
 
 
-SUPPORTED = ("angel", "kotak", "dhan", "icici")
+SUPPORTED = ("angel", "kotak", "dhan", "icici", "firstock")
 LABEL = {"angel": "Angel One", "kotak": "Kotak Neo", "dhan": "Dhan HQ",
-         "icici": "ICICI Direct"}
+         "icici": "ICICI Direct", "firstock": "Firstock"}
 
 # Health values kept in sync with charticks/src/bridge/events.ts BrokerHealth.
 CONNECTING = "connecting"
@@ -136,6 +137,21 @@ _KOTAK_LOGIN_HINTS = (
 )
 
 
+# Why a Firstock login usually fails, in the order worth checking. Firstock
+# names the rejected FIELD but never says which credential was wrong, so — as
+# with Kotak — the checklist travels with the error rather than leaving the user
+# to re-enter all five hoping to hit the right one.
+_FIRSTOCK_LOGIN_HINTS = (
+    "Check, in this order: (1) the User ID, exactly as Firstock issued it; "
+    "(2) the password — Charticks hashes it for you, so enter it as you type it "
+    "on Firstock's own site; (3) the Vendor Code and (4) the API Key from your "
+    "Firstock API app, which are a matched pair; (5) the TOTP secret — the "
+    "setup key from Firstock's 2FA screen, NOT a 6-digit code, and required on "
+    "every Firstock login. A PC clock more than ~30s out will fail every "
+    "attempt even when all five are correct."
+)
+
+
 class BrokerManager:
     """Owns broker sessions + health, keyed by account id. Thread-safe;
     connect/disconnect run on a worker thread (the REST endpoints hand off)."""
@@ -146,6 +162,11 @@ class BrokerManager:
         self._detail: dict[str, str | None] = {}
         self._broker: dict[str, str] = {}  # account_id -> broker type
         self._sessions: dict[str, Any] = {}  # account_id -> SDK session
+        # Firstock-only, for now: the order-update WebSocket that makes its
+        # order lifecycle event-driven instead of purely polled (Phase 4). No
+        # other broker has one yet; adding one is a new adapter plus a new
+        # entry in this dict, exactly like the sessions map above.
+        self._order_feeds: dict[str, Any] = {}
         # Credentials cached in-memory only (never persisted here — the
         # Electron encrypted store owns that) so the reliability layer can
         # re-run the login sequence automatically after a session expires,
@@ -307,6 +328,8 @@ class BrokerManager:
                 result = self._connect_dhan(account_id, creds)
             elif broker == "icici":
                 result = self._connect_icici(account_id, creds)
+            elif broker == "firstock":
+                result = self._connect_firstock(account_id, creds)
             else:
                 self._set_health(account_id, broker, DOWN, "no connector implemented")
                 diagnostics.event("broker", "Broker login", "failed", broker=label,
@@ -329,15 +352,36 @@ class BrokerManager:
         limit_resolver.invalidate(account_id)
         with self._lock:
             broker = self._broker.get(account_id, "")
-            self._sessions.pop(account_id, None)
+            session = self._sessions.pop(account_id, None)
         with self._lock:
             self._creds.pop(account_id, None)
+        # Tell the broker we are done with the token, where the session knows
+        # how to say so. Duck-typed, and deliberately NOT called `logout`:
+        # several broker SDKs already have a `logout` of their own with
+        # different semantics, so keying off a distinct name means adding this
+        # cannot change what disconnect does for any existing broker. A session
+        # that does not define it is simply dropped, exactly as before.
+        closer = getattr(session, "close_session", None)
+        if callable(closer):
+            try:
+                closer()
+                diagnostics.event("broker", "Broker logout", "success",
+                                  broker=LABEL.get(broker, broker), account=account_id)
+            except Exception as exc:
+                # Never fatal: an account must be removable while the network is
+                # down, and the local session is gone either way.
+                self._log("warn", f"⚠️  {LABEL.get(broker, broker)} logout call failed "
+                                  f"({exc}) — the local session was still removed")
         # Tear down this account's feed, if it had one (mirrors logout()). The
         # router stops the socket and promotes another feed for any capability
         # this one was primary for, so the data plane self-heals.
         self.router.detach(account_id)
         if account_id == self._market_account:
             self._market_account = None
+        with self._lock:
+            order_feed = self._order_feeds.pop(account_id, None)
+        if order_feed is not None:
+            order_feed.stop()
         self._set_health(account_id, broker, DOWN)
         self._log("info", f"🔒 {LABEL.get(broker, broker)} account disconnected")
         return {"ok": True}
@@ -404,6 +448,35 @@ class BrokerManager:
         # registered as running but is not actually connected.
         feed.start()
 
+    def _start_order_feed(self, account_id: str, client: Any) -> None:
+        """Bring up (or replace) this Firstock account's order-update
+        WebSocket. Firstock-only for now — no other broker has one — so this
+        lives here rather than going through FeedRouter, which is scoped to
+        market data. Adding a second broker's order feed is a new adapter plus
+        a branch here, exactly like every other per-broker connect step.
+
+        A fresh FirstockOrderFeed is built (not reused) on every call, the
+        same way `_build_transport` rebuilds per attempt: the client object it
+        closes over is the live session, and rebuilding is simpler than
+        proving an old feed's stale reference was swapped correctly.
+        """
+        from services.feeds.firstock_order_feed import FirstockOrderFeed
+
+        with self._lock:
+            previous = self._order_feeds.get(account_id)
+        if previous is not None:
+            previous.stop()
+        feed = FirstockOrderFeed(account_id, client, self._log)
+        with self._lock:
+            self._order_feeds[account_id] = feed
+        feed.start()
+
+    def order_feed_status(self) -> dict[str, dict]:
+        """Diagnostics read model for every Firstock order-update socket."""
+        with self._lock:
+            feeds = dict(self._order_feeds)
+        return {aid: feed.status() for aid, feed in feeds.items()}
+
     # ── reliability layer hooks ────────────────────────────────────────────
     def reauthenticate(self, account_id: str) -> dict:
         """Re-run the login sequence for `account_id` using cached
@@ -430,6 +503,12 @@ class BrokerManager:
             return self._connect_kotak(account_id, creds)
         if broker == "dhan":
             return self._connect_dhan(account_id, creds)
+        if broker == "firstock":
+            # Every Firstock credential is cached, including the TOTP secret, so
+            # a fresh code can be generated and the whole login re-run without
+            # the user present — the same unattended recovery Angel and Kotak
+            # get, and the opposite of ICICI's browser-only session.
+            return self._connect_firstock(account_id, creds)
         return {"ok": False, "error": f"unknown broker '{broker}'"}
 
     def _on_session_recovered(self, account_id: str) -> None:
@@ -441,6 +520,20 @@ class BrokerManager:
         if feed is not None:
             feed.reconnect()
         self.subscriptions.replay_all()
+        with self._lock:
+            order_feed = self._order_feeds.get(account_id)
+        if order_feed is not None:
+            order_feed.reconnect()
+        # A dead session means this account's positions have not been confirmed
+        # for however long it was down — every managed position on it read
+        # RESTORING-shaped staleness until the next scheduled poll (up to 4s
+        # away) caught up. Re-read now, not on the ordinary interval: a stop
+        # that was silently unconfirmed should be re-armed the moment the
+        # account is actually back, not several seconds later. Imported lazily
+        # — position_reconciler imports `manager` from this module at load
+        # time, so a top-level import here would be circular.
+        from services.position_reconciler import reconciler
+        reconciler.reconcile_soon()
 
     # ── Angel One (reuses login.py:136-164 sequence) ──────────────────────
     def _connect_angel(self, account_id: str, creds: dict) -> dict:
@@ -689,6 +782,121 @@ class BrokerManager:
             self._set_health(account_id, "icici", SESSION_EXPIRED, detail)
             self._log("error", f"❌ ICICI Direct Login Failed: {e}")
             return {"ok": False, "error": detail}
+
+    # ── Firstock ──────────────────────────────────────────────────────────
+    def _connect_firstock(self, account_id: str, creds: dict) -> dict:
+        """Authenticate a Firstock account and bring its market feed up.
+
+        The simplest login of the five: one POST, no SDK, no two-step handshake.
+        The care here is entirely in what counts as success — a 200 with a token
+        in it is NOT proof that the token works, and reporting one as connected
+        is exactly how ICICI used to arm live trading on a dead session.
+        """
+        from services.feeds import firstock_client
+
+        user_id = creds.get("userId")
+        password = creds.get("password")
+        vendor_code = creds.get("vendorCode")
+        api_key = creds.get("apiKey")
+        # Required, despite reading like a 2FA extra. Firstock validates the
+        # TOTP field before any credential, so an account saved without a secret
+        # fails EVERY login with "TOTP cannot be empty" — a broker-side message
+        # about a field the user was told was optional. Caught here instead, by
+        # name, before a request is sent.
+        totp_secret = creds.get("totpSecret")
+
+        missing = [name for name, value in (("userId", user_id),
+                                            ("password", password),
+                                            ("vendorCode", vendor_code),
+                                            ("apiKey", api_key),
+                                            ("totpSecret", totp_secret)) if not value]
+        if missing:
+            msg = f"Missing Firstock credentials ({'/'.join(missing)})"
+            self._set_health(account_id, "firstock", DOWN, msg)
+            return {"ok": False, "error": msg}
+
+        try:
+            self._log("info", "🔄 Firstock: authenticating...")
+            client = firstock_client.login(user_id, password, vendor_code,
+                                           api_key, totp_secret)
+            # Prove the session with a real authenticated call before anything
+            # is told it is connected. userDetails is the cheapest one that
+            # requires a live token, and it reports which exchanges the account
+            # actually carries.
+            self._log("info", "🔄 Firstock: validating session...")
+            client.validate()
+
+            with self._lock:
+                self._sessions[account_id] = client
+            self._set_health(account_id, "firstock", CONNECTED)
+            self._log("info", f"✅ Firstock Login Success (account {client.actid})")
+
+            # An entitlement gap is not a login failure, but it decides whether
+            # any order can ever be placed — so it is said now, once, rather
+            # than discovered later as a rejection that blames the contract.
+            absent = client.missing_option_exchanges
+            if absent:
+                self._log("warn", f"⚠️  Firstock account {client.actid} is not enabled "
+                                  f"for {', '.join(absent)} — index options on those "
+                                  f"venues cannot be traded on it")
+
+            # The feed rides THIS session object rather than building its own,
+            # so there is exactly one token per account and a re-auth refreshes
+            # it everywhere at once. It treats the client as read-only — quotes
+            # and reference data only, never login or logout — because the order
+            # router will hold the same reference.
+            self._start_feed(account_id, "firstock", session_tokens={"client": client})
+            # Order lifecycle events for this account now arrive over its own
+            # WebSocket (Phase 4) rather than purely from the order-sync
+            # poller. Started here, alongside the market feed, so both come up
+            # together on every fresh login AND every reauthenticate() (this
+            # method is the ONE place both paths call).
+            self._start_order_feed(account_id, client)
+            return {"ok": True}
+        except Exception as e:
+            detail = firstock_client.redact(e)
+            # A network failure and a rejected credential are different problems
+            # with different fixes, and the Brokers page shows the difference.
+            # Calling both "login failed" sends a user to re-check credentials
+            # that were never the problem.
+            if classify_error(e) == "network":
+                msg = (f"Could not reach Firstock ({detail}). Charticks will keep "
+                       f"trying; check your internet connection.")
+                self._set_health(account_id, "firstock", DOWN, msg)
+                self._log("error", f"❌ Firstock unreachable: {detail}")
+                return {"ok": False, "error": msg}
+            # An IP rejection is not a credential failure and must not be
+            # reported as one. Firstock checks the caller's source address
+            # before it looks at any credential, so the five-point credential
+            # checklist below is not merely unhelpful here — it is a loop the
+            # user cannot exit, because every item on it is already correct.
+            #
+            # The one fact that resolves it is the address THIS process
+            # presents, which the user cannot reliably look up: a browser may
+            # egress by a different route, so "what is my IP" can disagree with
+            # what Firstock sees. So it is measured and quoted.
+            if isinstance(e, firstock_client.FirstockError) and e.is_ip_rejection:
+                seen_as = firstock_client.public_ip()
+                where = (f"This machine's public IP is {seen_as}"
+                         if seen_as else
+                         "This machine's public IP could not be determined")
+                msg = (f"Firstock refused this connection's IP address. "
+                       f"{where}. Add exactly that address to the IP allow-list "
+                       f"for your Firstock API app (Firstock connect portal → "
+                       f"your API app → IP whitelist) and try again. Your "
+                       f"credentials are not the problem — Firstock checks the "
+                       f"address before it checks any of them.")
+                self._set_health(account_id, "firstock", DOWN, msg)
+                self._log("error", f"❌ Firstock refused this IP: {detail}")
+                self._log("info", f"ℹ️  {where} — whitelist that address in the "
+                                  f"Firstock API portal. A whitelist with the wrong "
+                                  f"address in it fails exactly like an empty one.")
+                return {"ok": False, "error": msg}
+            msg = f"{detail} — {_FIRSTOCK_LOGIN_HINTS}"
+            self._set_health(account_id, "firstock", SESSION_EXPIRED, msg)
+            self._log("error", f"❌ Firstock Login Failed: {detail}")
+            self._log("info", f"ℹ️  {_FIRSTOCK_LOGIN_HINTS}")
+            return {"ok": False, "error": msg}
 
     # ── Instrument master (headless port of login.py:392-425) ─────────────
     def _load_master(self, smart: Any) -> None:
@@ -945,6 +1153,12 @@ class BrokerManager:
         immediately instead of polling. `key` is canonical, so a listener sees
         the same identity no matter which broker's feed carried the tick."""
         self.router.add_option_tick_listener(fn)
+
+    def add_index_tick_listener(self, fn: Any) -> None:
+        """fn(symbol: str, ltp: float) — the index-tick counterpart of
+        add_option_tick_listener, same synchronous, same-thread-as-the-feed
+        delivery guarantees."""
+        self.router.add_index_tick_listener(fn)
 
     def get_option_ltp(self, ref: "str | InstrumentKey") -> float | None:
         key = self.as_key(ref)

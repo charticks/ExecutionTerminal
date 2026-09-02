@@ -9,6 +9,58 @@ interface BridgeConfig {
 type Listener = (e: BridgeEvent) => void;
 type StatusListener = (connected: boolean) => void;
 
+/** How long a control-plane call may hang before it is reported as failed.
+ *
+ *  `fetch` has NO timeout of its own: a request to a socket that was accepted
+ *  and then abandoned never settles, and an `await` on it never returns. That
+ *  is not a hypothetical — a stale sidecar left holding the dev port poisoned
+ *  the connection pool and left the Brokers page on "Connecting…" forever,
+ *  with no error anywhere, because the `catch` that renders one was never
+ *  reached. A screen stuck mid-action with nothing to read is worse than a
+ *  failure: there is nothing to act on and no reason to believe it is stuck.
+ *
+ *  Generous on purpose — this is a backstop against a dead socket, not a
+ *  latency budget. Anything slower than this is broken, not busy. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Broker login is the one call that is legitimately slow: an SDK handshake
+ *  plus an instrument-master download, and Firstock alone allows 45s for the
+ *  login and 30s more to validate the session. Cutting that short would report
+ *  a working connect as a failure, so it gets its own, longer deadline. */
+const CONNECT_TIMEOUT_MS = 150_000;
+
+const SLOW_PATHS = ["/brokers/connect", "/brokers/reconnect"];
+
+function timeoutFor(path: string): number {
+  return SLOW_PATHS.some((p) => path.startsWith(p))
+    ? CONNECT_TIMEOUT_MS
+    : REQUEST_TIMEOUT_MS;
+}
+
+/** `fetch` with a deadline, reported as an error a user can act on.
+ *
+ *  AbortError is rewritten because the raw wording ("The user aborted a
+ *  request") is actively misleading in a tooltip: the user aborted nothing. */
+async function fetchWithTimeout(url: string, init: RequestInit,
+                                timeoutMs: number, path: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(
+        `${path} timed out after ${Math.round(timeoutMs / 1000)}s — the sidecar ` +
+        `accepted the connection but never answered. If this persists, restart ` +
+        `the app; a leftover sidecar on the same port will do this.`,
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Single connection to the Python sidecar:
  *  - REST for request/response (control plane)
@@ -87,23 +139,23 @@ class BridgeClient {
   /** Control-plane request. */
   async post<T = unknown>(path: string, body?: unknown): Promise<T> {
     if (!this.cfg) this.cfg = await resolveConfig();
-    const res = await fetch(`${this.cfg.restUrl}${path}`, {
+    const res = await fetchWithTimeout(`${this.cfg.restUrl}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${this.cfg.token}`,
       },
       body: body ? JSON.stringify(body) : undefined,
-    });
+    }, timeoutFor(path), path);
     if (!res.ok) throw new Error(`${path} → ${res.status}`);
     return res.json() as Promise<T>;
   }
 
   async get<T = unknown>(path: string): Promise<T> {
     if (!this.cfg) this.cfg = await resolveConfig();
-    const res = await fetch(`${this.cfg.restUrl}${path}`, {
+    const res = await fetchWithTimeout(`${this.cfg.restUrl}${path}`, {
       headers: { Authorization: `Bearer ${this.cfg.token}` },
-    });
+    }, timeoutFor(path), path);
     if (!res.ok) throw new Error(`${path} → ${res.status}`);
     return res.json() as Promise<T>;
   }

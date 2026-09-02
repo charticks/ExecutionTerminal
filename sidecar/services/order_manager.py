@@ -644,7 +644,8 @@ class OrderManager:
     # the "not available yet" gate in _place_with_splitting — adding live
     # routing for a broker is one method plus one entry.
     _LIVE_PLACERS = {"angel": "_place_angel", "icici": "_place_icici",
-                     "kotak": "_place_kotak", "dhan": "_place_dhan"}
+                     "kotak": "_place_kotak", "dhan": "_place_dhan",
+                     "firstock": "_place_firstock"}
 
     def _live_placer(self, broker: str):
         name = self._LIVE_PLACERS.get((broker or "").lower())
@@ -657,9 +658,11 @@ class OrderManager:
     #   modifier(account_id, sess, order, price, qty) -> dict
     #   canceller(account_id, sess, order)            -> dict
     _LIVE_MODIFIERS = {"angel": "_modify_angel", "icici": "_modify_icici",
-                       "kotak": "_modify_kotak", "dhan": "_modify_dhan"}
+                       "kotak": "_modify_kotak", "dhan": "_modify_dhan",
+                       "firstock": "_modify_firstock"}
     _LIVE_CANCELLERS = {"angel": "_cancel_angel", "icici": "_cancel_icici",
-                        "kotak": "_cancel_kotak", "dhan": "_cancel_dhan"}
+                        "kotak": "_cancel_kotak", "dhan": "_cancel_dhan",
+                        "firstock": "_cancel_firstock"}
 
     def _live_modifier(self, broker: str):
         name = self._LIVE_MODIFIERS.get((broker or "").lower())
@@ -1033,6 +1036,117 @@ class OrderManager:
     # record, so an unchanged field is resubmitted as it was placed rather than
     # defaulted — a modify that silently turns MIS into NRML, or a LIMIT into a
     # MARKET, is a different order than the user asked for.
+
+    # ── Firstock ───────────────────────────────────────────────────────────
+    # Firstock addresses an order by exchange + tradingSymbol rather than by
+    # token, and BOTH come from its scrip master. Nothing here translates a
+    # product or order type: that is the adapter's job (see
+    # services/feeds/firstock_client.py), so this router keeps speaking
+    # Charticks' own model exactly as it does for every other broker.
+
+    def _firstock_contract(self, account_id: str, client: Any, underlying: str,
+                           expiry: str, strike: float,
+                           opt_type: str) -> tuple[dict | None, str]:
+        """(contract, error) for a leg. Never guesses either half.
+
+        A missing contract triggers ONE instrument reload before it is refused,
+        so an order repairs a stale or failed scrip load rather than making the
+        user deduce that reconnecting is the remedy — the same self-repair the
+        Kotak order path gained after a failed load disabled trading for a
+        session.
+        """
+        from services.instruments import InstrumentKey
+
+        key = InstrumentKey.option(underlying, expiry, strike, opt_type)
+        scrip = manager.router.scrip_of("firstock", client)
+        if scrip is None:
+            return None, ("Firstock has no instrument list loaded for this "
+                          "account, so nothing can be traded on it. Reconnect "
+                          "the Firstock account.")
+        contract = scrip.contract_for(key)
+        if contract is None:
+            feed = manager.router.feed_for(account_id)
+            if feed is not None and hasattr(feed, "reload_instruments"):
+                try:
+                    if feed.reload_instruments():
+                        contract = scrip.contract_for(key)
+                except Exception as exc:
+                    diagnostics.exception("orders", "Firstock instrument reload failed",
+                                          exc_info=exc, symbol=str(key))
+        if contract is None:
+            detail = ""
+            try:
+                detail = scrip.explain_miss(key)
+            except Exception as exc:      # diagnosis must never mask the refusal
+                diagnostics.exception("orders", "Firstock miss diagnosis failed",
+                                      exc_info=exc, symbol=str(key))
+            diagnostics.emit("orders", "warn", "Firstock contract not resolved",
+                             requested=key.position_id, optionsLoaded=scrip.option_count,
+                             diagnosis=detail or "(unavailable)")
+            return None, (f"Firstock's instrument list ({scrip.option_count:,} options) "
+                          f"does not contain {key}"
+                          + (f" - {detail}" if detail else "")
+                          + ". Its symbol file is refreshed daily, so a contract "
+                            "added today may need the account reconnected.")
+        return contract, ""
+
+    def _place_firstock(self, account_id: str, client: Any, underlying: str,
+                        expiry: str, strike: float, opt_type: str, side: str,
+                        qty: int, order_type: str, price: float,
+                        product: str = "NRML", validity: str = "DAY",
+                        client_order_id: str = "") -> dict:
+        contract, error = self._firstock_contract(account_id, client, underlying,
+                                                  expiry, strike, opt_type)
+        if contract is None:
+            return {"ok": False, "broker": "firstock", "error": error}
+        try:
+            order_number = client.place_order(
+                exchange=contract["exchange"],
+                trading_symbol=contract["tradingSymbol"],
+                side=side, qty=int(qty), order_type=order_type, price=price,
+                product=product, validity=validity,
+                # The client order id rides in `remarks`, which Firstock
+                # requires and echoes on the order book - the whole basis of
+                # duplicate detection for this broker.
+                remarks=client_order_id)
+        except Exception as e:
+            manager.session_manager.report_error(account_id, "firstock", e)
+            raise
+        return {"ok": True, "broker": "firstock", "orderId": order_number,
+                "tradingsymbol": contract["tradingSymbol"]}
+
+    def _modify_firstock(self, account_id: str, client: Any, order: Any,
+                         price: float, qty: int) -> dict:
+        contract, error = self._firstock_contract(
+            account_id, client, order.underlying, order.expiry, order.strike,
+            order.opt_type)
+        if contract is None:
+            return {"ok": False, "broker": "firstock", "error": error}
+        # A price is only meaningful on a LIMIT order, and a modify that carries
+        # one implies the user wants a limit - so an amended price on a MARKET
+        # order converts it rather than being silently dropped. Same rule as
+        # Angel and Dhan, so the behaviour does not depend on the broker.
+        order_type = "LIMIT" if price > 0 else order.order_type
+        try:
+            returned = client.modify_order(
+                order_number=str(order.order_id),
+                exchange=contract["exchange"],
+                trading_symbol=contract["tradingSymbol"],
+                qty=int(qty), order_type=order_type,
+                price=price if price > 0 else order.price,
+                product=order.product, validity=order.validity)
+        except Exception as e:
+            manager.session_manager.report_error(account_id, "firstock", e)
+            raise
+        return {"ok": True, "broker": "firstock", "orderId": returned}
+
+    def _cancel_firstock(self, account_id: str, client: Any, order: Any) -> dict:
+        try:
+            returned = client.cancel_order(str(order.order_id))
+        except Exception as e:
+            manager.session_manager.report_error(account_id, "firstock", e)
+            raise
+        return {"ok": True, "broker": "firstock", "orderId": returned}
 
     def _modify_angel(self, account_id: str, smart: Any, order: Any,
                       price: float, qty: int) -> dict:
